@@ -78,3 +78,12 @@ test('directory grants apply to the directory and everything under it, nearest w
   expect(Object.keys(effectiveGrants(all, '/w2'))).toEqual(['root'])
   expect(Object.keys(effectiveGrants(all, '/w')).sort()).toEqual(['a', 'b', 'root'])
 })
+
+test('only the first line can name profiles with #vault:', async () => {
+  const { selectProfiles } = await import('./select')
+  const profiles = { 'prod-db': { type: 'postgres', secrets: ['password'], env: { PGPASSWORD: '{secret:password}' } } }
+  const later = selectProfiles('git commit -m "note\n#vault: anything here"', profiles as any, new Set(['prod-db']))
+  expect('deny' in later ? later.deny : [...later.picks.keys()]).toEqual([])
+  const first = selectProfiles('#vault:prod-db\npsql', profiles as any, new Set(['prod-db']))
+  expect('deny' in first ? first.deny : [...first.picks.keys()]).toEqual(['prod-db'])
+})

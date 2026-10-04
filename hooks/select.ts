@@ -37,7 +37,9 @@ export const namedClash = (name: string, p: VaultProfile, others: Record<string,
  */
 export function selectProfiles(command: string, profiles: Record<string, VaultProfile>, granted: Set<string>): SelectResult {
   const picks: Selection = new Map()
-  const header = /^\s*#\s*vault:\s*([\w,-]+)/m.exec(command)
+  // only the command's first line names profiles: the same text further down (a heredoc, a commit
+  // message, a script's comments) is content, not an instruction to the vault
+  const header = /^\s*#\s*vault:\s*([\w,-]+)/.exec(command)
 
   if (header) {
     const names = [...new Set(header[1].split(',').map(n => n.trim()).filter(Boolean))]
@@ -53,7 +55,7 @@ export function selectProfiles(command: string, profiles: Record<string, VaultPr
       if (list.length > 1) {
         return {
           deny: `vault: ${list.join('、')} 都会设置 ${k}，不能在同一条命令里一起用 #vault: 指定。` +
-            `请分开执行，或去掉 #vault:，直接用各自的专属变量（如 $${prefixOf(list[0])}_PASSWORD、$${prefixOf(list[1])}_PASSWORD）。`,
+            `请分开执行，或去掉 #vault:，直接用各自的专属变量（$${prefixOf(list[0])}_*、$${prefixOf(list[1])}_*，实际名称见 vault_list）。`,
         }
       }
     }

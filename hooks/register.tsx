@@ -510,40 +510,48 @@ async function activeGrants($: EngineInterface) {
 async function syncStatus($: EngineInterface) {
   const names = Object.keys((await read($, grantsA)) as Record<string, VaultGrant>)
   $.ui.status(names.length ? `🔐 vault: ${names.join(', ')}` : undefined)
-  await registerTools($, names)
 }
 
 // ---------- tools the model sees ----------
-async function registerTools($: EngineInterface, granted: string[]) {
-  const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
-  const list = granted.length
-    ? granted.map(n => (profiles[n]?.description ? `${n} (${profiles[n].description})` : n)).join(', ')
-    : '(none)'
+// Registered once per load with fixed text: the tool list must not change mid-session, so the
+// grant state is read through vault_list instead of being baked into the descriptions.
+async function registerTools($: EngineInterface) {
   await $.tool.register({
     name: 'vault_list',
     description:
-      'List credential profiles managed by the vault mod (databases, servers, clusters). Returns names, types, hosts, ' +
-      'env var names and grant state — never secret values. Profiles granted to the current directory: ' + list + '.',
+      'List the credential profiles the vault mod manages (databases, servers, clusters) and which of them are granted to ' +
+      'the current directory. For each profile: name, type, host, port, user, database, description, SSH auth method, grant ' +
+      '({mode: "read" | "write", directory} or false), its own variable names and its client variable names. Secret values ' +
+      'are never returned. Call it to choose a profile and the exact variable names before vault_exec or a Bash command that ' +
+      'needs credentials. Grants are given and revoked by the user in the /vault pane; no tool can change them.',
     inputSchema: { type: 'object', properties: {} },
   })
   await $.tool.register({
     name: 'vault_exec',
     description:
-      'Run a shell command with a granted credential profile injected as environment variables. You never see the secret; ' +
-      'output is redacted. Use this instead of asking for passwords. Every profile has its own variables named after it ' +
-      '(profile prod-db: $PROD_DB_HOST, $PROD_DB_USER, $PROD_DB_PASSWORD; file secrets as $<NAME>_<SECRET>_FILE), plus the ' +
-      "client's standard variables (PGPASSWORD, KUBECONFIG, SSH askpass, ...). vault_list shows each profile's variables. " +
-      'In Bash, referencing $<NAME>_* injects that profile\'s own variables; starting the command with "#vault:<profile>" also ' +
-      'injects the client variables (one profile per client: two postgres profiles cannot share one #vault: line). ' +
-      'Injection is refused for run_in_background Bash commands. Variables exist only for the one command and its child processes. ' +
-      'Granted to the current directory: ' + list + '. If a profile is not granted, ask the user to grant it to this directory in the /vault pane.',
+      'Run a bash command with one credential profile injected as environment variables, so it can reach a database, server ' +
+      'or cluster without the secret entering the conversation. Use it instead of asking the user for a password or key. ' +
+      'The profile must be granted to the current directory (vault_list shows grants); otherwise the call is refused and the ' +
+      'user grants it in the /vault pane. ' +
+      'Injected: the profile\'s own variables, named after it (profile prod-db: $PROD_DB_HOST, $PROD_DB_USER, $PROD_DB_PASSWORD; ' +
+      'a file secret such as an SSH key or kubeconfig as $<NAME>_<SECRET>_FILE, a 0600 temp file removed when the command ends), ' +
+      'plus the client\'s standard variables (PGPASSWORD, KUBECONFIG, SSH askpass, ...) so psql, kubectl or ssh need no flags. ' +
+      'Variables exist only for this command and its child processes. ' +
+      'Returns "exit code: N" followed by stdout and stderr, each capped at 4 MiB. A secret value in the output is replaced ' +
+      'by «vault:<profile>.<field>»; that marker is expected, not an error. ' +
+      'Refused: commands that read the Keychain or the vault directory, or dump the environment (env, printenv, set); and, ' +
+      'under a read grant, commands that look like writes to a database, Redis or kubectl. A read grant does not restrict ' +
+      'commands run over SSH. ' +
+      'The Bash tool gets the same injection: referencing $<NAME>_* injects that profile\'s own variables, and a first line ' +
+      '"#vault:<profile>" also injects its client variables (two profiles of one client cannot share a #vault: line). ' +
+      'Bash commands with run_in_background cannot be injected.',
     inputSchema: {
       type: 'object',
       properties: {
-        profile: { type: 'string', description: 'profile name' },
-        command: { type: 'string', description: 'bash command; profile env vars are set' },
-        cwd: { type: 'string' },
-        timeoutSec: { type: 'number', description: 'default 120, max 600' },
+        profile: { type: 'string', description: 'Name of a profile granted to the current directory, as vault_list lists it.' },
+        command: { type: 'string', description: 'Bash command, run with bash -c; the profile\'s variables are in its environment.' },
+        cwd: { type: 'string', description: 'Directory to run in, absolute or relative to the session\'s working directory. Defaults to the session\'s working directory.' },
+        timeoutSec: { type: 'number', description: 'Seconds before the command is killed and an error is returned. Default 120, maximum 600.' },
       },
       required: ['profile', 'command'],
     },
@@ -991,6 +999,7 @@ export const register: Register = on => {
     await loadUsage($)
     await migrateLegacyAllowlist($)
     await refreshGrants($)
+    await registerTools($)
     // grants survive a reload in $.state, the redaction table does not: reload it
     await warmRedaction($)
     await sweepRun($)
