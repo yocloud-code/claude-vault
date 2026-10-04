@@ -342,10 +342,21 @@ async function vaultAccounts($: EngineInterface): Promise<string[]> {
 }
 
 // Accounts that belong to no current profile secret (deleted profiles, switched SSH auth, renames).
-async function orphanAccounts($: EngineInterface) {
-  const profiles = await loadProfiles($)
-  const wanted = new Set(Object.entries(profiles).flatMap(([n, p]) => p.secrets.map(f => `${n}.${f}`)))
-  return (await vaultAccounts($)).filter(a => !wanted.has(a))
+// Never guess: an unreadable profiles.json would make every secret look orphaned, so it yields
+// `unsafe` and nothing is offered for deletion.
+async function orphanAccounts($: EngineInterface): Promise<{ orphans: string[]; unsafe?: string; noProfiles?: boolean }> {
+  const { profiles: file } = await paths($)
+  let profiles: Record<string, VaultProfile> = {}
+  if (await $.fs.exists(file)) {
+    try {
+      profiles = JSON.parse(await $.fs.read(file)) as Record<string, VaultProfile>
+    } catch {
+      return { orphans: [], unsafe: 'profiles.json 无法读取，为安全起见跳过' }
+    }
+  }
+  const wanted = new Set(Object.entries(profiles).flatMap(([n, p]) => (p.secrets ?? []).map(f => `${n}.${f}`)))
+  const orphans = (await vaultAccounts($)).filter(a => !wanted.has(a))
+  return { orphans, noProfiles: Object.keys(profiles).length === 0 }
 }
 
 async function strayRunFiles($: EngineInterface) {
@@ -371,14 +382,23 @@ async function cleanupPlan($: EngineInterface): Promise<VaultCleanupItem[]> {
   const grants = Object.keys(all[here] ?? {})
   const stale = await staleGrants($, all)
   const stray = await strayRunFiles($)
-  const orphans = await orphanAccounts($)
+  const orph = await orphanAccounts($)
+  const orphans = orph.orphans
   const probes = Object.keys((await read($, probesA)) as Record<string, VaultProbe>)
   const { audit: file } = await paths($)
   let lines = 0
   try { lines = (await $.fs.read(file)).split('\n').filter(Boolean).length } catch {}
   return [
     { key: 'grants', label: '撤销当前目录的全部授权', detail: grants.join('、') || '无（上级目录的授权请在「授权管理」里撤销）', count: grants.length, on: false },
-    { key: 'orphans', label: '删除孤立的钥匙串条目', detail: orphans.join('、') || '无（已删除、改名或切换认证方式后留下的旧密文）', count: orphans.length, on: true },
+    {
+      key: 'orphans', label: '删除孤立的钥匙串条目',
+      detail: orph.unsafe ?? (orph.noProfiles && orphans.length
+        ? `⚠ 当前没有任何 profile，这些都会被删除：${orphans.join('、')}`
+        : orphans.join('、') || '无（只会删除不属于任何现有 profile 的旧密文）'),
+      count: orphans.length,
+      // with no profile at all, deleting everything is a decision the person makes explicitly
+      on: !orph.noProfiles,
+    },
     { key: 'stale-grants', label: '移除失效的授权', detail: stale.map(x => `${x.name} @ ${x.dir.replace(/^\/Users\/[^/]+/, '~')}`).join('、') || '无（profile 已删除或目录已不存在）', count: stale.length, on: true },
     { key: 'stray', label: '删除残留的临时文件', detail: stray.length ? `${stray.length} 个（私钥、kubeconfig、env 文件）` : '无', count: stray.length, on: true },
     { key: 'probes', label: '清除测试连接结果', detail: probes.join('、') || '无', count: probes.length, on: true },
@@ -398,7 +418,8 @@ async function runCleanupPlan($: EngineInterface, keys: string[]) {
       await refreshGrants($)
       done.push(`撤销当前目录 ${n} 个授权`)
     } else if (key === 'orphans') {
-      const orphans = await orphanAccounts($)
+      const { orphans, unsafe } = await orphanAccounts($)
+      if (unsafe) { done.push(unsafe); continue }
       for (const a of orphans) await deleteSecret($, a)
       done.push(`删除 ${orphans.length} 个孤立钥匙串条目`)
     } else if (key === 'stale-grants') {
