@@ -52,6 +52,8 @@ const base = (view: PaneState['view'], cols: number, extra: Partial<PaneState> =
   probing: 'k8s-prod',
   usage: { 'prod-db': { count: 12, last: now - 180000 } },
   surface: 'desktop',
+  grantDur: { 'k8s-prod': 240 },
+  cleanup: null,
   now, ...extra,
 })
 
@@ -59,15 +61,21 @@ const cases: [string, PaneState][] = [
   ['list @100', base('list', 100)],
   ['list @60', base('list', 60)],
   ['list empty', base('list', 100, { profiles: {}, trust: 'none', notice: '' })],
-  ['edit', base('edit', 100, { form: { original: 'prod-db', name: 'prod-db', description: '生产库只读', variant: 'default', type: 'postgres', host: '10.0.0.5', port: '5432', user: 'ro_user', database: 'app', secrets: 'password', env: 'PGPASSWORD={secret:password}', allow: true, mode: 'read', advanced: false } })],
-  ['edit kube new', base('edit', 100, { form: { name: '', description: '', variant: 'default', type: 'kube', host: '', port: '', user: '', database: '', secrets: 'kubeconfig', env: '', allow: false, mode: 'read', advanced: false } })],
-  ['edit ssh saved', base('edit', 56, { stored: { 'bastion.password': true }, form: { original: 'bastion', name: 'bastion', description: '跳板机', variant: 'password', type: 'ssh', host: '1.2.3.4', port: '22', user: 'deploy', database: '', secrets: 'key', env: '', allow: true, mode: 'write', advanced: false } })],
-  ['edit custom', base('edit', 100, { form: { original: 'x', name: 'x', description: '', variant: 'default', type: 'custom', host: '', port: '', user: '', database: '', secrets: 'token', env: 'API_TOKEN={secret:token}', allow: false, mode: 'read', advanced: true } })],
+  ['edit', base('edit', 100, { form: { original: 'prod-db', name: 'prod-db', description: '生产库只读', variant: 'default', type: 'postgres', host: '10.0.0.5', port: '5432', user: 'ro_user', database: 'app', secrets: 'password', env: 'PGPASSWORD={secret:password}', allow: true, mode: 'read', advanced: false, ttl: 480 } })],
+  ['edit kube new', base('edit', 100, { form: { name: '', description: '', variant: 'default', type: 'kube', host: '', port: '', user: '', database: '', secrets: 'kubeconfig', env: '', allow: false, mode: 'read', advanced: false, ttl: 480 } })],
+  ['edit ssh saved', base('edit', 56, { stored: { 'bastion.password': true }, form: { original: 'bastion', name: 'bastion', description: '跳板机', variant: 'password', type: 'ssh', host: '1.2.3.4', port: '22', user: 'deploy', database: '', secrets: 'key', env: '', allow: true, mode: 'write', advanced: false, ttl: 60 } })],
+  ['edit custom', base('edit', 100, { form: { original: 'x', name: 'x', description: '', variant: 'default', type: 'custom', host: '', port: '', user: '', database: '', secrets: 'token', env: 'API_TOKEN={secret:token}', allow: false, mode: 'read', advanced: true, ttl: 480 } })],
   ['export', base('export', 100)],
   ['import', base('import', 100, { importPreview: { file: '/Users/x/backup-20261004.cvault', encrypted: true, items: [
     { name: 'prod-db', status: 'conflict', action: 'skip', secretCount: 1, clientVars: ['PGPASSWORD'], problems: [] },
     { name: 'redis-cache', status: 'new', action: 'add', secretCount: 1, clientVars: ['BASH_ENV'], problems: ['BASH_ENV 会让 shell 或解释器执行任意代码，不允许设置'] }] } })],
   ['audit', base('audit', 100)],
+  ['cleanup', base('cleanup', 100, { cleanup: [
+    { key: 'grants', label: '撤销本会话的全部授权', detail: 'prod-db', count: 1, on: true },
+    { key: 'orphans', label: '删除孤立的钥匙串条目', detail: 'old-db.password', count: 1, on: true },
+    { key: 'audit', label: '清空审计日志', detail: '120 条记录，清空后无法恢复', count: 120, on: false },
+  ] })],
+  ['cleanup checking', base('cleanup', 56)],
 ]
 
 test('every view draws', () => {

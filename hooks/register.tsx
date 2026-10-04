@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
+import type { VaultCleanupItem, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
 import { hasSecretsDeep, redact, redactDeep, remember } from './redact'
 import { dumpReason, isAllowFile, isVaultPath, peekReason, writeReason } from './guard'
 import { HEADER, ITER, envelope, isSealed, parsePlain, sealedBody, unwrap } from './transfer'
@@ -125,6 +125,15 @@ async function saveAllow($: EngineInterface, cwd: string, allow: Allow) {
   const raw = JSON.stringify({ allow }, null, 2) + '\n'
   await $.fs.write(allowPath(cwd), raw)
   return raw
+}
+
+// Saves the allowlist and trusts it as written: every caller is the person acting in the pane.
+async function writeAllowTrusted($: EngineInterface, allow: Allow) {
+  const raw = await saveAllow($, cwd, allow)
+  const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
+  await $.store.set('trusted', { ...trusted, [cwd]: await sha256(raw) })
+  await update($, trustA, () => 'trusted')
+  await update($, allowA, () => allow)
 }
 
 async function sha256(text: string) {
@@ -253,6 +262,92 @@ async function runWithProfile($: EngineInterface, name: string, p: VaultProfile,
   }
 }
 
+const durationLabel = (m: number) => (m >= 60 ? `${m / 60} 小时` : `${m} 分钟`)
+
+// Keychain accounts under the vault's service, from attribute dumps only (no secret is printed).
+async function vaultAccounts($: EngineInterface): Promise<string[]> {
+  const r = await $.process.run(['/usr/bin/security', 'dump-keychain'], { timeoutMs: 60_000 })
+  if (r.exitCode !== 0) return []
+  const out: string[] = []
+  for (const block of r.stdout.split(/^keychain: /m)) {
+    if (!/"svce"<blob>="claude-vault"/.test(block)) continue
+    const acct = /"acct"<blob>="([^"]*)"/.exec(block)?.[1]
+    if (acct && SAFE.test(acct)) out.push(acct)
+  }
+  return [...new Set(out)]
+}
+
+// Accounts that belong to no current profile secret (deleted profiles, switched SSH auth, renames).
+async function orphanAccounts($: EngineInterface) {
+  const profiles = await loadProfiles($)
+  const wanted = new Set(Object.entries(profiles).flatMap(([n, p]) => p.secrets.map(f => `${n}.${f}`)))
+  return (await vaultAccounts($)).filter(a => !wanted.has(a))
+}
+
+async function strayRunFiles($: EngineInterface) {
+  const { run } = await paths($)
+  const entries = await $.fs.list(run).catch(() => [])
+  return entries.filter(x => x.kind === 'file').map(x => `${run}/${x.name}`).filter(f => !liveFiles.has(f))
+}
+
+async function cleanupPlan($: EngineInterface): Promise<VaultCleanupItem[]> {
+  const grants = Object.keys(await activeGrants($))
+  const stray = await strayRunFiles($)
+  const orphans = await orphanAccounts($)
+  const probes = Object.keys((await read($, probesA)) as Record<string, VaultProbe>)
+  const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
+  const { allow } = await loadAllow($, cwd)
+  const staleAllow = Object.keys(allow).filter(n => !profiles[n])
+  const { audit: file } = await paths($)
+  let lines = 0
+  try { lines = (await $.fs.read(file)).split('\n').filter(Boolean).length } catch {}
+  return [
+    { key: 'grants', label: '撤销本会话的全部授权', detail: grants.join('、') || '无', count: grants.length, on: true },
+    { key: 'orphans', label: '删除孤立的钥匙串条目', detail: orphans.join('、') || '无（已删除、改名或切换认证方式后留下的旧密文）', count: orphans.length, on: true },
+    { key: 'stale-allow', label: '移除白名单里已不存在的 profile', detail: staleAllow.join('、') || '无', count: staleAllow.length, on: true },
+    { key: 'stray', label: '删除残留的临时文件', detail: stray.length ? `${stray.length} 个（私钥、kubeconfig、env 文件）` : '无', count: stray.length, on: true },
+    { key: 'probes', label: '清除测试连接结果', detail: probes.join('、') || '无', count: probes.length, on: true },
+    { key: 'audit', label: '清空审计日志', detail: `${lines} 条记录，清空后无法恢复`, count: lines, on: false },
+  ]
+}
+
+async function runCleanupPlan($: EngineInterface, keys: string[]) {
+  const done: string[] = []
+  for (const key of keys) {
+    if (key === 'grants') {
+      const names = Object.keys((await read($, grantsA)) as Record<string, VaultGrant>)
+      for (const n of names) await revoke($, n)
+      done.push(`撤销 ${names.length} 个授权`)
+    } else if (key === 'orphans') {
+      const orphans = await orphanAccounts($)
+      for (const a of orphans) await deleteSecret($, a)
+      done.push(`删除 ${orphans.length} 个孤立钥匙串条目`)
+    } else if (key === 'stale-allow') {
+      const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
+      const { allow } = await loadAllow($, cwd)
+      const stale = Object.keys(allow).filter(n => !profiles[n])
+      for (const n of stale) delete allow[n]
+      if (stale.length) await writeAllowTrusted($, allow)
+      done.push(`白名单移除 ${stale.length} 项`)
+    } else if (key === 'stray') {
+      const stray = await strayRunFiles($)
+      await removeFiles($, stray)
+      done.push(`删除 ${stray.length} 个临时文件`)
+    } else if (key === 'probes') {
+      await update($, probesA, () => ({}))
+      done.push('清除测试结果')
+    } else if (key === 'audit') {
+      const { audit: file } = await paths($)
+      await writePrivate($, file, '')
+      await update($, usageA, () => ({}))
+      done.push('清空审计日志')
+    }
+  }
+  await audit($, { event: 'cleanup', items: keys })
+  await refreshProfiles($)
+  return done
+}
+
 // ---------- export encryption (system openssl; the passphrase rides in the child env, never argv) ----------
 async function seal($: EngineInterface, bundle: Bundle, pass: string): Promise<string> {
   const json = JSON.stringify(bundle)
@@ -295,6 +390,8 @@ const auditA = atom({ plugin: 'vault', key: 'audit' } as const, [])
 const probesA = atom({ plugin: 'vault', key: 'probes' } as const, {})
 const probingA = atom({ plugin: 'vault', key: 'probing' } as const, '')
 const usageA = atom({ plugin: 'vault', key: 'usage' } as const, {})
+const grantDurA = atom({ plugin: 'vault', key: 'grantDur' } as const, {})
+const cleanupA = atom({ plugin: 'vault', key: 'cleanup' } as const, null)
 
 let cwd = ''
 // decrypted import bundle: module memory only, never $.state
@@ -484,7 +581,7 @@ const blankForm = (type = 'postgres'): VaultForm => {
   return {
     name: '', description: '', type, variant: v.key, host: '', port: t.port ? String(t.port) : '', user: '', database: '',
     secrets: v.secrets.map(x => x.name).join(','), env: envToText(v.env),
-    allow: false, mode: 'read', advanced: type === 'custom',
+    allow: false, mode: 'read', advanced: type === 'custom', ttl: DEFAULT_TTL,
   }
 }
 
@@ -535,9 +632,57 @@ function actions($: EngineInterface): Actions {
     await update($, viewA, () => view)
   },
   select: n => void update($, selectedA, () => n),
-  grant: async n => {
+  setDuration: (n, minutes) => void update($, grantDurA, (d: Record<string, number>) => ({ ...d, [n]: minutes })),
+  setGrantMode: async (n, mode) => {
+    const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
+    if (!g) return
+    await update($, grantsA, (gs: Record<string, VaultGrant>) => ({ ...gs, [n]: { ...gs[n], mode } }))
+    await audit($, { event: 'grant-mode', profile: n, mode })
+    await syncStatus($)
+    await notice($, `${n} 已切换为${mode === 'write' ? '读写' : '只读'}`)
+  },
+  extend: async (n, minutes) => {
+    const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
+    if (!g) return
+    const expiresAt = Math.max(g.expiresAt, now()) + minutes * 60000
+    await update($, grantsA, (gs: Record<string, VaultGrant>) => ({ ...gs, [n]: { ...gs[n], expiresAt } }))
+    await audit($, { event: 'grant-extend', profile: n, minutes })
+    await notice($, `${n} 授权已延长 ${durationLabel(minutes)}`)
+  },
+  setAllow: async (n, mode) => {
+    const { allow } = await loadAllow($, cwd)
+    if (mode === 'off') delete allow[n]
+    else allow[n] = { mode, ttlMinutes: allow[n]?.ttlMinutes ?? DEFAULT_TTL }
+    await writeAllowTrusted($, allow)
+    await audit($, { event: 'allowlist', profile: n, mode })
+    await notice($, mode === 'off' ? `${n} 已移出本项目白名单` : `${n} 已加入本项目白名单（${mode === 'write' ? '读写' : '只读'}），以后打开本项目自动授权`)
+  },
+  setAllowTtl: async (n, minutes) => {
+    const { allow } = await loadAllow($, cwd)
+    if (!allow[n]) return
+    allow[n] = { ...allow[n], ttlMinutes: minutes }
+    await writeAllowTrusted($, allow)
+  },
+  openCleanup: async () => {
+    // null while the plan is computed: the view says it is checking
+    await update($, cleanupA, () => null)
+    await update($, viewA, () => 'cleanup')
+    const items = await cleanupPlan($)
+    await update($, cleanupA, () => items)
+  },
+  toggleCleanup: key => void update($, cleanupA, (items: VaultCleanupItem[] | null) =>
+    items ? items.map(i => (i.key === key ? { ...i, on: !i.on } : i)) : items),
+  runCleanup: async () => {
+    const items = ((await read($, cleanupA)) as VaultCleanupItem[] | null) ?? []
+    const done = await runCleanupPlan($, items.filter(i => i.on && i.count > 0).map(i => i.key))
+    await update($, cleanupA, () => null)
+    await update($, viewA, () => 'list')
+    await notice($, done.length ? `清理完成：${done.join('；')}` : '没有需要清理的内容')
+  },
+  grant: async (n, mode, minutes) => {
     const allow = (await read($, allowA)) as Allow
-    await grant($, n, allow[n]?.mode === 'write' ? 'write' : 'read', allow[n]?.ttlMinutes ?? 60, 'manual')
+    const dur = ((await read($, grantDurA)) as Record<string, number>)[n]
+    await grant($, n, mode ?? (allow[n]?.mode === 'write' ? 'write' : 'read'), minutes ?? dur ?? allow[n]?.ttlMinutes ?? 60, 'manual')
     const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
     const stored = (await read($, storedA)) as Record<string, boolean>
     const unset = (p?.secrets ?? []).filter(x => !stored[`${n}.${x}`])
@@ -553,7 +698,7 @@ function actions($: EngineInterface): Actions {
     await update($, formA, () => ({
       original: n, name: n, description: p.description ?? '', type: p.type, variant: variantOf(p.type, p.variant).key, host: p.host ?? '', port: p.port ? String(p.port) : '', user: p.user ?? '',
       database: p.database ?? '', secrets: p.secrets.join(','), env: envToText(p.env),
-      allow: !!allow[n], mode: allow[n]?.mode === 'write' ? 'write' : 'read', advanced: !isDefaultMapping(p),
+      allow: !!allow[n], mode: allow[n]?.mode === 'write' ? 'write' : 'read', advanced: !isDefaultMapping(p), ttl: allow[n]?.ttlMinutes ?? DEFAULT_TTL,
     }))
     await update($, confirmDeleteA, () => '')
     await update($, viewA, () => 'edit')
@@ -627,13 +772,9 @@ function actions($: EngineInterface): Actions {
     // the person edited the allowlist in the pane: it is trusted as written
     const { allow } = await loadAllow($, cwd)
     if (f.original && f.original !== name) delete allow[f.original]
-    if (f.allow) allow[name] = { ...allow[name], mode: f.mode }
+    if (f.allow) allow[name] = { mode: f.mode, ttlMinutes: f.ttl }
     else delete allow[name]
-    const raw = await saveAllow($, cwd, allow)
-    const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
-    await $.store.set('trusted', { ...trusted, [cwd]: await sha256(raw) })
-    await update($, trustA, () => 'trusted')
-    await update($, allowA, () => allow)
+    await writeAllowTrusted($, allow)
     await audit($, { event: 'save-profile', profile: name, allow: f.allow ? f.mode : false })
     await refreshProfiles($)
     await syncStatus($)
@@ -979,6 +1120,8 @@ export const register: Register = on => {
       probes: await read($, probesA),
       probing: await read($, probingA),
       usage: await read($, usageA),
+      grantDur: await read($, grantDurA),
+      cleanup: await read($, cleanupA),
       surface: e.surface,
       now: now(),
     } as any, actions($))

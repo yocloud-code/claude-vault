@@ -1,4 +1,4 @@
-import type { VaultForm, VaultGrant, VaultImportPreview, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
+import type { VaultCleanupItem, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
 import { TEMPLATES, envToText, exampleFor, namedVars, parseEnv, prefixOf, templateOf, variantOf } from './templates'
 import type { FieldKey, SecretDef } from './templates'
 
@@ -22,6 +22,8 @@ export type PaneState = {
   probes: Record<string, VaultProbe>
   probing: string
   usage: Record<string, VaultUsage>
+  grantDur: Record<string, number>
+  cleanup: VaultCleanupItem[] | null
   surface?: string
   now: number
 }
@@ -29,7 +31,15 @@ export type PaneState = {
 export type Actions = {
   go: (view: VaultView) => void
   select: (name: string) => void
-  grant: (name: string) => void
+  grant: (name: string, mode?: VaultMode, minutes?: number) => void
+  setDuration: (name: string, minutes: number) => void
+  setGrantMode: (name: string, mode: VaultMode) => void
+  extend: (name: string, minutes: number) => void
+  setAllow: (name: string, mode: VaultMode | 'off') => void
+  setAllowTtl: (name: string, minutes: number) => void
+  openCleanup: () => void
+  toggleCleanup: (key: string) => void
+  runCleanup: () => void
   revoke: (name: string) => void
   trust: () => void
   newProfile: () => void
@@ -79,6 +89,10 @@ const ago = (now: number, at: number) => {
   return h < 48 ? `${h} 小时前` : `${Math.round(h / 24)} 天前`
 }
 
+export const DURATIONS = [15, 30, 60, 120, 240, 480, 1440]
+const durLabel = (m: number) => (m >= 60 ? `${m / 60} 小时` : `${m} 分钟`)
+const durOptions = DURATIONS.map(m => ({ value: String(m), label: durLabel(m) }))
+
 const noticeTone = (n: string) =>
   n.startsWith('✖') ? 'red' : n.startsWith('⚠') ? 'yellow' : n.startsWith('✔') ? 'green' : 'cyan'
 
@@ -111,7 +125,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
   const total = Object.keys(s.profiles).length
   const crumbs: Record<VaultView, string> = {
     list: '凭证', edit: s.form?.original ? `编辑 ${s.form.original}` : '新建凭证',
-    export: '导出', import: '导入', audit: '审计日志',
+    export: '导出', import: '导入', audit: '审计日志', cleanup: '一键清理',
   }
   const trust = {
     none: { text: '无项目白名单', color: 'gray' },
@@ -299,6 +313,12 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
               ? `保存后写入本项目白名单，本项目的会话会自动获得${f.mode === 'write' ? '读写' : '只读'}授权`
               : '不写入白名单；需要时可在列表里临时授权本会话'}
           </Text>
+          {f.allow ? (
+            <Box gap={1} alignItems="center" marginTop={1}>
+              <Text dimColor>每次自动授权时长</Text>
+              <Select key="f-ttl" value={String(f.ttl)} options={durOptions} onSelect={(v: string) => a.formSet({ ttl: Number(v) })} />
+            </Box>
+          ) : null}
           {f.type === 'ssh' && f.allow && f.mode === 'read'
             ? <Text color="yellow">⚠ 只读模式不会拦截 SSH 上执行的命令。只想让 Claude 查看时，请在服务器上为它使用一个权限受限的账号。</Text>
             : null}
@@ -381,6 +401,36 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         <Toolbar>
           <Button key="i-go" label="确认导入" variant="primary" onPress={() => a.confirmImport()} />
           <Button key="i-cancel" label="取消" role="dismiss" onPress={() => a.cancelImport()} />
+        </Toolbar>
+      </Box>
+    )
+  }
+
+  // ---------- cleanup ----------
+  if (s.view === 'cleanup') {
+    const items = s.cleanup
+    const chosen = (items ?? []).filter(i => i.on && i.count > 0)
+    return (
+      <Box flexDirection="column">
+        {header}
+        {notice}
+        <Card k="c-clean" title="选择要清理的内容">
+          {items === null ? <Text dimColor>正在检查钥匙串、临时文件和白名单…</Text> : null}
+          {(items ?? []).map(i => (
+            <Box key={`cl-${i.key}`} flexDirection="column" marginTop={1}>
+              <Box gap={1} alignItems="center">
+                <Button key={`clb-${i.key}`} plain label={`${i.on ? '☑' : '☐'}  ${i.label}`} onPress={() => a.toggleCleanup(i.key)} />
+                <Badge text={i.count ? `${i.count} 项` : '无需清理'} color={i.count ? (i.key === 'audit' ? 'yellow' : 'cyan') : 'gray'} />
+              </Box>
+              <Text dimColor wrap="truncate-end">{`   ${i.detail}`}</Text>
+            </Box>
+          ))}
+          <Text dimColor>不会删除任何 profile 或正在使用的密文；正在运行的命令的临时文件不会被删除。</Text>
+        </Card>
+        <Toolbar>
+          <Button key="cl-go" label={chosen.length ? `清理 ${chosen.length} 类` : '没有可清理的'} variant="primary"
+            onPress={() => chosen.length && a.runCleanup()} />
+          <Button key="cl-back" label="返回" hotkey="b" role="dismiss" onPress={() => a.go('list')} />
         </Toolbar>
       </Box>
     )
@@ -476,20 +526,57 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
                   ? <Button key={`pr-${n}`} label={s.probing === n ? '测试中…' : '测试连接'} onPress={() => s.probing !== n && a.probe(n)} />
                   : null}
                 <Button key={`ed-${n}`} label="编辑" onPress={() => a.editProfile(n)} />
-                {g
-                  ? <Button key={`rv-${n}`} label="撤销" onPress={() => a.revoke(n)} />
-                  : missingSecret
-                    ? <Button key={`gr-${n}`} label="先设置密文" variant="primary" onPress={() => a.editProfile(n)} />
-                    : <Button key={`gr-${n}`} label="授权" variant="primary" onPress={() => a.grant(n)} />}
+                {missingSecret
+                  ? <Button key={`gr-${n}`} label="先设置密文" variant="primary" onPress={() => a.editProfile(n)} />
+                  : null}
+              </Box>
+            </Box>
+          )
+          const dur = s.grantDur[n] ?? s.allow[n]?.ttlMinutes ?? 60
+          const allowMode = s.allow[n]?.mode ?? 'off'
+          const access = (
+            <Box flexDirection="column" marginTop={1}>
+              <Box gap={1} alignItems="center" flexWrap="wrap">
+                <Box width={10} flexShrink={0}><Text dimColor>本会话</Text></Box>
+                {g ? (
+                  <>
+                    <Text color="green" bold>{`${g.mode === 'write' ? '读写' : '只读'} · 剩 ${remaining(g.expiresAt - s.now)}`}</Text>
+                    <Button key={`gm-${n}`} label={g.mode === 'write' ? '改为只读' : '改为读写'} onPress={() => a.setGrantMode(n, g.mode === 'write' ? 'read' : 'write')} />
+                    <Select key={`ext-d-${n}`} value={String(dur)} options={durOptions} onSelect={(v: string) => a.setDuration(n, Number(v))} />
+                    <Button key={`ext-${n}`} label="延长" onPress={() => a.extend(n, dur)} />
+                    <Button key={`rv2-${n}`} label="撤销" onPress={() => a.revoke(n)} />
+                  </>
+                ) : missingSecret ? (
+                  <Text color="yellow">缺少密文，设置后才能授权</Text>
+                ) : (
+                  <>
+                    <Select key={`dur-${n}`} value={String(dur)} options={durOptions} onSelect={(v: string) => a.setDuration(n, Number(v))} />
+                    <Button key={`gr-r-${n}`} label="只读授权" variant="primary" onPress={() => a.grant(n, 'read', dur)} />
+                    <Button key={`gr-w-${n}`} label="读写授权" onPress={() => a.grant(n, 'write', dur)} />
+                  </>
+                )}
+              </Box>
+              <Box gap={1} alignItems="center" flexWrap="wrap">
+                <Box width={10} flexShrink={0}><Text dimColor>项目白名单</Text></Box>
+                {(['off', 'read', 'write'] as const).map(m => (
+                  <Button key={`al-${n}-${m}`} label={{ off: '不自动', read: '自动只读', write: '自动读写' }[m]}
+                    variant={allowMode === m ? 'primary' : 'secondary'} onPress={() => allowMode !== m && a.setAllow(n, m)} />
+                ))}
+                {allowMode !== 'off'
+                  ? <Select key={`al-ttl-${n}`} value={String(s.allow[n]?.ttlMinutes ?? 480)} options={durOptions}
+                      onSelect={(v: string) => a.setAllowTtl(n, Number(v))} />
+                  : null}
               </Box>
             </Box>
           )
           return (
-            <Box key={`card-${n}`} borderStyle="round" borderColor={sel ? 'cyan' : g ? 'green' : 'gray'}
-              hover={{ borderColor: 'cyan' }} paddingX={1} marginTop={1} gap={2}
-              flexDirection={narrow ? 'column' : 'row'} justifyContent="space-between">
-              {info}
-              {side}
+            <Box key={`card-${n}`} flexDirection="column" borderStyle="round" borderColor={sel ? 'cyan' : g ? 'green' : 'gray'}
+              hover={{ borderColor: 'cyan' }} paddingX={1} marginTop={1}>
+              <Box gap={2} flexDirection={narrow ? 'column' : 'row'} justifyContent="space-between">
+                {info}
+                {side}
+              </Box>
+              {access}
             </Box>
           )
         })
@@ -500,6 +587,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         <Button key="import" label="导入" hotkey="i" onPress={() => a.startImport()} />
         <Button key="export" label="导出" hotkey="x" onPress={() => a.go('export')} />
         <Button key="audit" label="审计日志" hotkey="l" onPress={() => a.go('audit')} />
+        <Button key="cleanup" label="🧹 一键清理" hotkey="c" onPress={() => a.openCleanup()} />
         <Button key="close" label="关闭" role="dismiss" onPress={() => a.close()} />
       </Toolbar>
     </Box>

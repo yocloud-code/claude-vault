@@ -16,7 +16,7 @@ export type VaultProfile = {
 
 export type VaultGrant = { mode: VaultMode; expiresAt: number; source: 'allowlist' | 'manual' }
 
-export type VaultView = 'list' | 'edit' | 'export' | 'import' | 'audit'
+export type VaultView = 'list' | 'edit' | 'export' | 'import' | 'audit' | 'cleanup'
 
 export type VaultForm = {
   original?: string
@@ -33,6 +33,7 @@ export type VaultForm = {
   allow: boolean
   mode: VaultMode
   advanced: boolean
+  ttl: number
 }
 
 export type VaultImportItem = {
@@ -47,6 +48,8 @@ export type VaultImportItem = {
 export type VaultProbe = { ok: boolean; at: number; ms: number; message: string }
 
 export type VaultUsage = { count: number; last: number }
+
+export type VaultCleanupItem = { key: string; label: string; detail: string; count: number; on: boolean }
 
 export type VaultImportPreview = {
   file: string
@@ -74,6 +77,8 @@ declare module 'claude-code' {
       probes: Record<string, VaultProbe>
       probing: string
       usage: Record<string, VaultUsage>
+      grantDur: Record<string, number>
+      cleanup: VaultCleanupItem[] | null
     }
   }
 }
