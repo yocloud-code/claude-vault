@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { VaultCleanupItem, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
+import type { VaultCleanupItem, VaultDirGrants, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
 import { hasSecretsDeep, redact, redactDeep, remember } from './redact'
 import { dumpReason, isAllowFile, isVaultPath, peekReason, writeReason } from './guard'
 import { HEADER, ITER, envelope, isSealed, parsePlain, sealedBody, unwrap } from './transfer'
 import type { Bundle } from './transfer'
 import { renderPane } from './ui'
-import { aliasKey, namedClash, selectProfiles, varsOf } from './select'
+import { aliasKey, effectiveGrants, namedClash, selectProfiles, varsOf } from './select'
 import { envProblem, envProblems, envToText, exampleFor, isDefaultMapping, missingFields, namedVars, parseEnv, templateOf, variantOf } from './templates'
 import type { Actions } from './ui'
 
@@ -89,7 +89,7 @@ type Allow = Record<string, { mode: VaultMode; ttlMinutes?: number }>
 const paths = async ($: EngineInterface) => {
   const home = (await $.env.get('HOME')) ?? ''
   const dir = `${home}/.claude/vault`
-  return { home, dir, profiles: `${dir}/profiles.json`, audit: `${dir}/audit.log`, run: `${dir}/run` }
+  return { home, dir, profiles: `${dir}/profiles.json`, grants: `${dir}/grants.json`, audit: `${dir}/audit.log`, run: `${dir}/run` }
 }
 
 const allowPath = (cwd: string) => `${cwd}/.claude/vault.json`
@@ -121,19 +121,85 @@ async function loadAllow($: EngineInterface, cwd: string): Promise<{ allow: Allo
   }
 }
 
-async function saveAllow($: EngineInterface, cwd: string, allow: Allow) {
-  const raw = JSON.stringify({ allow }, null, 2) + '\n'
-  await $.fs.write(allowPath(cwd), raw)
-  return raw
+// ---------- directory grants ----------
+// Grants belong to a directory (and everything under it) and last until revoked. They live in
+// ~/.claude/vault/grants.json, outside any repository, so a cloned project cannot grant itself.
+
+async function loadGrantFile($: EngineInterface): Promise<VaultDirGrants> {
+  const { grants } = await paths($)
+  try {
+    const parsed = JSON.parse(await $.fs.read(grants)) as { dirs?: VaultDirGrants }
+    return parsed.dirs ?? {}
+  } catch {
+    return {}
+  }
 }
 
-// Saves the allowlist and trusts it as written: every caller is the person acting in the pane.
-async function writeAllowTrusted($: EngineInterface, allow: Allow) {
-  const raw = await saveAllow($, cwd, allow)
+async function saveGrantFile($: EngineInterface, dirs: VaultDirGrants) {
+  const { grants } = await paths($)
+  const clean = Object.fromEntries(Object.entries(dirs).filter(([, e]) => Object.keys(e).length))
+  await writePrivate($, grants, JSON.stringify({ version: 1, dirs: clean }, null, 2) + '\n')
+}
+
+// The session's directory as a real path, so a symlinked spelling meets the same grants.
+async function currentDir($: EngineInterface) {
+  const raw = (await $.session.cwd().catch(() => '')) || cwd
+  const real = (await $.fs.stat(raw, { resolve: true }).catch(() => undefined))?.realPath
+  return real || raw
+}
+
+let lastRawCwd = ''
+
+async function refreshGrants($: EngineInterface) {
+  lastRawCwd = (await $.session.cwd().catch(() => '')) || cwd
+  const dir = await currentDir($)
+  cwd = dir
+  const all = await loadGrantFile($)
+  await update($, dirA, () => dir)
+  await update($, allGrantsA, () => all)
+  await update($, grantsA, () => effectiveGrants(all, dir))
+  await syncStatus($)
+}
+
+// Grants or revokes `name` for `dir` (default: the session's directory); mode 'off' revokes.
+async function setGrant($: EngineInterface, name: string, mode: VaultMode | 'off', dir?: string) {
+  const where = dir ?? (await currentDir($))
+  const all = await loadGrantFile($)
+  const entries = { ...(all[where] ?? {}) }
+  if (mode === 'off') delete entries[name]
+  else entries[name] = { mode, at: now() }
+  all[where] = entries
+  await saveGrantFile($, all)
+  await audit($, { event: mode === 'off' ? 'revoke' : 'grant', profile: name, mode, dir: where })
+  await refreshGrants($)
+  if (mode !== 'off') await warmRedaction($)
+}
+
+// Applies `fn` to every directory's entries (rename, delete) and saves.
+async function editAllGrants($: EngineInterface, fn: (entries: Record<string, { mode: VaultMode; at: number }>) => void) {
+  const all = await loadGrantFile($)
+  for (const entries of Object.values(all)) fn(entries)
+  await saveGrantFile($, all)
+  await refreshGrants($)
+}
+
+// A project's old `.claude/vault.json` allowlist becomes grants on its directory, once, and only
+// when the person had trusted that exact file.
+async function migrateLegacyAllowlist($: EngineInterface) {
+  const { allow, raw } = await loadAllow($, cwd)
+  if (raw === null) return
+  const migrated = ((await $.store.get('migratedAllowlists')) ?? {}) as Record<string, boolean>
+  if (migrated[cwd]) return
   const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
-  await $.store.set('trusted', { ...trusted, [cwd]: await sha256(raw) })
-  await update($, trustA, () => 'trusted')
-  await update($, allowA, () => allow)
+  if (trusted[cwd] === (await sha256(raw))) {
+    const all = await loadGrantFile($)
+    const entries = { ...(all[cwd] ?? {}) }
+    for (const [n, a] of Object.entries(allow)) if (!entries[n]) entries[n] = { mode: a.mode === 'write' ? 'write' : 'read', at: now() }
+    all[cwd] = entries
+    await saveGrantFile($, all)
+    await audit($, { event: 'migrate-allowlist', profiles: Object.keys(allow), dir: cwd })
+  }
+  await $.store.set('migratedAllowlists', { ...migrated, [cwd]: true })
 }
 
 async function sha256(text: string) {
@@ -262,8 +328,6 @@ async function runWithProfile($: EngineInterface, name: string, p: VaultProfile,
   }
 }
 
-const durationLabel = (m: number) => (m >= 60 ? `${m / 60} 小时` : `${m} 分钟`)
-
 // Keychain accounts under the vault's service, from attribute dumps only (no secret is printed).
 async function vaultAccounts($: EngineInterface): Promise<string[]> {
   const r = await $.process.run(['/usr/bin/security', 'dump-keychain'], { timeoutMs: 60_000 })
@@ -290,21 +354,32 @@ async function strayRunFiles($: EngineInterface) {
   return entries.filter(x => x.kind === 'file').map(x => `${run}/${x.name}`).filter(f => !liveFiles.has(f))
 }
 
+// Grants naming a deleted profile, or a directory that no longer exists.
+async function staleGrants($: EngineInterface, all: VaultDirGrants) {
+  const profiles = await loadProfiles($)
+  const out: { dir: string; name: string }[] = []
+  for (const [dir, entries] of Object.entries(all)) {
+    const exists = await $.fs.exists(dir).catch(() => false)
+    for (const name of Object.keys(entries)) if (!exists || !profiles[name]) out.push({ dir, name })
+  }
+  return out
+}
+
 async function cleanupPlan($: EngineInterface): Promise<VaultCleanupItem[]> {
-  const grants = Object.keys(await activeGrants($))
+  const all = await loadGrantFile($)
+  const here = await currentDir($)
+  const grants = Object.keys(all[here] ?? {})
+  const stale = await staleGrants($, all)
   const stray = await strayRunFiles($)
   const orphans = await orphanAccounts($)
   const probes = Object.keys((await read($, probesA)) as Record<string, VaultProbe>)
-  const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
-  const { allow } = await loadAllow($, cwd)
-  const staleAllow = Object.keys(allow).filter(n => !profiles[n])
   const { audit: file } = await paths($)
   let lines = 0
   try { lines = (await $.fs.read(file)).split('\n').filter(Boolean).length } catch {}
   return [
-    { key: 'grants', label: '撤销本会话的全部授权', detail: grants.join('、') || '无', count: grants.length, on: true },
+    { key: 'grants', label: '撤销当前目录的全部授权', detail: grants.join('、') || '无（上级目录的授权请在「授权管理」里撤销）', count: grants.length, on: false },
     { key: 'orphans', label: '删除孤立的钥匙串条目', detail: orphans.join('、') || '无（已删除、改名或切换认证方式后留下的旧密文）', count: orphans.length, on: true },
-    { key: 'stale-allow', label: '移除白名单里已不存在的 profile', detail: staleAllow.join('、') || '无', count: staleAllow.length, on: true },
+    { key: 'stale-grants', label: '移除失效的授权', detail: stale.map(x => `${x.name} @ ${x.dir.replace(/^\/Users\/[^/]+/, '~')}`).join('、') || '无（profile 已删除或目录已不存在）', count: stale.length, on: true },
     { key: 'stray', label: '删除残留的临时文件', detail: stray.length ? `${stray.length} 个（私钥、kubeconfig、env 文件）` : '无', count: stray.length, on: true },
     { key: 'probes', label: '清除测试连接结果', detail: probes.join('、') || '无', count: probes.length, on: true },
     { key: 'audit', label: '清空审计日志', detail: `${lines} 条记录，清空后无法恢复`, count: lines, on: false },
@@ -315,20 +390,24 @@ async function runCleanupPlan($: EngineInterface, keys: string[]) {
   const done: string[] = []
   for (const key of keys) {
     if (key === 'grants') {
-      const names = Object.keys((await read($, grantsA)) as Record<string, VaultGrant>)
-      for (const n of names) await revoke($, n)
-      done.push(`撤销 ${names.length} 个授权`)
+      const here = await currentDir($)
+      const all = await loadGrantFile($)
+      const n = Object.keys(all[here] ?? {}).length
+      delete all[here]
+      await saveGrantFile($, all)
+      await refreshGrants($)
+      done.push(`撤销当前目录 ${n} 个授权`)
     } else if (key === 'orphans') {
       const orphans = await orphanAccounts($)
       for (const a of orphans) await deleteSecret($, a)
       done.push(`删除 ${orphans.length} 个孤立钥匙串条目`)
-    } else if (key === 'stale-allow') {
-      const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
-      const { allow } = await loadAllow($, cwd)
-      const stale = Object.keys(allow).filter(n => !profiles[n])
-      for (const n of stale) delete allow[n]
-      if (stale.length) await writeAllowTrusted($, allow)
-      done.push(`白名单移除 ${stale.length} 项`)
+    } else if (key === 'stale-grants') {
+      const all = await loadGrantFile($)
+      const stale = await staleGrants($, all)
+      for (const x of stale) delete all[x.dir]?.[x.name]
+      await saveGrantFile($, all)
+      await refreshGrants($)
+      done.push(`移除 ${stale.length} 个失效授权`)
     } else if (key === 'stray') {
       const stray = await strayRunFiles($)
       await removeFiles($, stray)
@@ -371,13 +450,12 @@ async function open($: EngineInterface, text: string, pass: string): Promise<Bun
 }
 
 const PANE = 'vault'
-const DEFAULT_TTL = 8 * 60
 
 const profilesA = atom({ plugin: 'vault', key: 'profiles' } as const, {})
 const storedA = atom({ plugin: 'vault', key: 'stored' } as const, {})
-const allowA = atom({ plugin: 'vault', key: 'allow' } as const, {})
 const grantsA = atom({ plugin: 'vault', key: 'grants' } as const, {})
-const trustA = atom({ plugin: 'vault', key: 'trust' } as const, 'none')
+const dirA = atom({ plugin: 'vault', key: 'dir' } as const, '')
+const allGrantsA = atom({ plugin: 'vault', key: 'allGrants' } as const, {})
 const viewA = atom({ plugin: 'vault', key: 'view' } as const, 'list')
 const selectedA = atom({ plugin: 'vault', key: 'selected' } as const, '')
 const formA = atom({ plugin: 'vault', key: 'form' } as const, null)
@@ -390,7 +468,6 @@ const auditA = atom({ plugin: 'vault', key: 'audit' } as const, [])
 const probesA = atom({ plugin: 'vault', key: 'probes' } as const, {})
 const probingA = atom({ plugin: 'vault', key: 'probing' } as const, '')
 const usageA = atom({ plugin: 'vault', key: 'usage' } as const, {})
-const grantDurA = atom({ plugin: 'vault', key: 'grantDur' } as const, {})
 const cleanupA = atom({ plugin: 'vault', key: 'cleanup' } as const, null)
 
 let cwd = ''
@@ -465,62 +542,17 @@ async function refreshProfiles($: EngineInterface) {
   return profiles
 }
 
+// The grants in force here. The session's directory can change mid-session: re-read it then.
 async function activeGrants($: EngineInterface) {
-  const grants = (await read($, grantsA)) as Record<string, VaultGrant>
-  const t = now()
-  return Object.fromEntries(Object.entries(grants).filter(([, g]) => g.expiresAt > t))
+  const raw = (await $.session.cwd().catch(() => '')) || cwd
+  if (raw !== lastRawCwd) await refreshGrants($)
+  return (await read($, grantsA)) as Record<string, VaultGrant>
 }
 
 async function syncStatus($: EngineInterface) {
-  const names = Object.keys(await activeGrants($))
+  const names = Object.keys((await read($, grantsA)) as Record<string, VaultGrant>)
   $.ui.status(names.length ? `🔐 vault: ${names.join(', ')}` : undefined)
   await registerTools($, names)
-}
-
-async function grant($: EngineInterface, name: string, mode: VaultMode, minutes: number, source: VaultGrant['source']) {
-  await update($, grantsA, (g: Record<string, VaultGrant>) => ({ ...g, [name]: { mode, expiresAt: now() + minutes * 60000, source } }))
-  await audit($, { event: 'grant', profile: name, mode, minutes, source })
-  await syncStatus($)
-  await warmRedaction($)
-}
-
-async function revoke($: EngineInterface, name: string) {
-  await update($, grantsA, (g: Record<string, VaultGrant>) => { const { [name]: _, ...rest } = g; return rest })
-  await audit($, { event: 'revoke', profile: name })
-  await syncStatus($)
-}
-
-async function applyAllow($: EngineInterface, allow: Allow) {
-  const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
-  for (const [n, a] of Object.entries(allow)) {
-    if (profiles[n]) await grant($, n, a.mode === 'write' ? 'write' : 'read', a.ttlMinutes ?? DEFAULT_TTL, 'allowlist')
-  }
-}
-
-async function checkTrust($: EngineInterface, autoGrant: boolean) {
-  const { allow, raw } = await loadAllow($, cwd)
-  await update($, allowA, () => allow)
-  if (raw === null) return update($, trustA, () => 'none')
-  const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
-  if (trusted[cwd] === (await sha256(raw))) {
-    await update($, trustA, () => 'trusted')
-    if (autoGrant) await applyAllow($, allow)
-  } else {
-    await update($, trustA, () => 'untrusted')
-    $.ui.toast('vault: 本项目的 .claude/vault.json 尚未信任（或已被修改），白名单未生效。/vault trust 查看并信任。')
-  }
-}
-
-async function trust($: EngineInterface) {
-  const { allow, raw } = await loadAllow($, cwd)
-  if (raw === null) return notice($, '本项目没有 .claude/vault.json')
-  const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
-  await $.store.set('trusted', { ...trusted, [cwd]: await sha256(raw) })
-  await update($, trustA, () => 'trusted')
-  await update($, allowA, () => allow)
-  await audit($, { event: 'trust', profiles: Object.keys(allow) })
-  await applyAllow($, allow)
-  await notice($, `已信任白名单: ${Object.keys(allow).join(', ') || '(空)'}`)
 }
 
 // ---------- tools the model sees ----------
@@ -533,7 +565,7 @@ async function registerTools($: EngineInterface, granted: string[]) {
     name: 'vault_list',
     description:
       'List credential profiles managed by the vault mod (databases, servers, clusters). Returns names, types, hosts, ' +
-      'env var names and grant state — never secret values. Profiles granted to this session: ' + list + '.',
+      'env var names and grant state — never secret values. Profiles granted to the current directory: ' + list + '.',
     inputSchema: { type: 'object', properties: {} },
   })
   await $.tool.register({
@@ -546,7 +578,7 @@ async function registerTools($: EngineInterface, granted: string[]) {
       'In Bash, referencing $<NAME>_* injects that profile\'s own variables; starting the command with "#vault:<profile>" also ' +
       'injects the client variables (one profile per client: two postgres profiles cannot share one #vault: line). ' +
       'Injection is refused for run_in_background Bash commands. Variables exist only for the one command and its child processes. ' +
-      'Granted now: ' + list + '. If a profile is not granted, ask the user to allow it in .claude/vault.json or via /vault.',
+      'Granted to the current directory: ' + list + '. If a profile is not granted, ask the user to grant it to this directory in the /vault pane.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -565,7 +597,7 @@ async function checkUse($: EngineInterface, name: string, command: string) {
   const p = profiles[name]
   if (!p) return { deny: `vault: 没有名为 ${name} 的 profile。` }
   const g = (await activeGrants($))[name]
-  if (!g) return { deny: `vault: profile ${name} 未授权给本会话。请让用户在 .claude/vault.json 里允许它并 /vault trust，或在 /vault 面板里点授权。` }
+  if (!g) return { deny: `vault: profile ${name} 未授权给当前目录。请让用户在 /vault 面板里授权（授权对该目录及其子目录长期有效）。` }
   const w = g.mode === 'read' ? writeReason(p, command) : undefined
   if (w) return { deny: w }
   return { p, g }
@@ -581,7 +613,7 @@ const blankForm = (type = 'postgres'): VaultForm => {
   return {
     name: '', description: '', type, variant: v.key, host: '', port: t.port ? String(t.port) : '', user: '', database: '',
     secrets: v.secrets.map(x => x.name).join(','), env: envToText(v.env),
-    allow: false, mode: 'read', advanced: type === 'custom', ttl: DEFAULT_TTL,
+    allow: false, mode: 'read', advanced: type === 'custom',
   }
 }
 
@@ -632,36 +664,26 @@ function actions($: EngineInterface): Actions {
     await update($, viewA, () => view)
   },
   select: n => void update($, selectedA, () => n),
-  setDuration: (n, minutes) => void update($, grantDurA, (d: Record<string, number>) => ({ ...d, [n]: minutes })),
-  setGrantMode: async (n, mode) => {
-    const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
-    if (!g) return
-    await update($, grantsA, (gs: Record<string, VaultGrant>) => ({ ...gs, [n]: { ...gs[n], mode } }))
-    await audit($, { event: 'grant-mode', profile: n, mode })
-    await syncStatus($)
-    await notice($, `${n} 已切换为${mode === 'write' ? '读写' : '只读'}`)
+  setGrant: async (n, mode) => {
+    if (mode === 'off') {
+      // an inherited grant lives on the directory above: revoke it where it was given
+      const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
+      const here = await currentDir($)
+      await setGrant($, n, 'off', g?.dir ?? here)
+      return notice($, g && g.dir !== here
+        ? `已撤销 ${n} 在 ${g.dir.replace(/^\/Users\/[^/]+/, '~')} 的授权（它的所有子目录同时失效）`
+        : `已撤销 ${n} 在当前目录的授权`)
+    }
+    await setGrant($, n, mode)
+    const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
+    const stored = (await read($, storedA)) as Record<string, boolean>
+    const unset = (p?.secrets ?? []).filter(x => !stored[`${n}.${x}`])
+    const label = mode === 'write' ? '读写' : '只读'
+    await notice($, unset.length ? `⚠ 已授权 ${n}（${label}），但还缺少密文：${unset.join('、')}` : `已授权 ${n}（${label}）给当前目录及其子目录`)
   },
-  extend: async (n, minutes) => {
-    const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
-    if (!g) return
-    const expiresAt = Math.max(g.expiresAt, now()) + minutes * 60000
-    await update($, grantsA, (gs: Record<string, VaultGrant>) => ({ ...gs, [n]: { ...gs[n], expiresAt } }))
-    await audit($, { event: 'grant-extend', profile: n, minutes })
-    await notice($, `${n} 授权已延长 ${durationLabel(minutes)}`)
-  },
-  setAllow: async (n, mode) => {
-    const { allow } = await loadAllow($, cwd)
-    if (mode === 'off') delete allow[n]
-    else allow[n] = { mode, ttlMinutes: allow[n]?.ttlMinutes ?? DEFAULT_TTL }
-    await writeAllowTrusted($, allow)
-    await audit($, { event: 'allowlist', profile: n, mode })
-    await notice($, mode === 'off' ? `${n} 已移出本项目白名单` : `${n} 已加入本项目白名单（${mode === 'write' ? '读写' : '只读'}），以后打开本项目自动授权`)
-  },
-  setAllowTtl: async (n, minutes) => {
-    const { allow } = await loadAllow($, cwd)
-    if (!allow[n]) return
-    allow[n] = { ...allow[n], ttlMinutes: minutes }
-    await writeAllowTrusted($, allow)
+  revokeAt: async (dir, n) => {
+    await setGrant($, n, 'off', dir)
+    await notice($, `已撤销 ${n} @ ${dir.replace(/^\/Users\/[^/]+/, '~')}`)
   },
   openCleanup: async () => {
     // null while the plan is computed: the view says it is checking
@@ -679,26 +701,15 @@ function actions($: EngineInterface): Actions {
     await update($, viewA, () => 'list')
     await notice($, done.length ? `清理完成：${done.join('；')}` : '没有需要清理的内容')
   },
-  grant: async (n, mode, minutes) => {
-    const allow = (await read($, allowA)) as Allow
-    const dur = ((await read($, grantDurA)) as Record<string, number>)[n]
-    await grant($, n, mode ?? (allow[n]?.mode === 'write' ? 'write' : 'read'), minutes ?? dur ?? allow[n]?.ttlMinutes ?? 60, 'manual')
-    const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
-    const stored = (await read($, storedA)) as Record<string, boolean>
-    const unset = (p?.secrets ?? []).filter(x => !stored[`${n}.${x}`])
-    await notice($, unset.length ? `⚠ 已授权 ${n}，但还缺少密文：${unset.join('、')}` : `已授权 ${n}（本会话）`)
-  },
-  revoke: async n => { await revoke($, n); await notice($, `已撤销 ${n}`) },
-  trust: () => void trust($),
   newProfile: async () => { await update($, formA, () => blankForm()); await update($, confirmDeleteA, () => ''); await update($, viewA, () => 'edit') },
   editProfile: async n => {
     const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
     if (!p) return
-    const allow = (await read($, allowA)) as Allow
+    const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
     await update($, formA, () => ({
       original: n, name: n, description: p.description ?? '', type: p.type, variant: variantOf(p.type, p.variant).key, host: p.host ?? '', port: p.port ? String(p.port) : '', user: p.user ?? '',
       database: p.database ?? '', secrets: p.secrets.join(','), env: envToText(p.env),
-      allow: !!allow[n], mode: allow[n]?.mode === 'write' ? 'write' : 'read', advanced: !isDefaultMapping(p), ttl: allow[n]?.ttlMinutes ?? DEFAULT_TTL,
+      allow: !!g, mode: g?.mode === 'write' ? 'write' : 'read', advanced: !isDefaultMapping(p),
     }))
     await update($, confirmDeleteA, () => '')
     await update($, viewA, () => 'edit')
@@ -761,20 +772,15 @@ function actions($: EngineInterface): Actions {
     all[name] = profile
     await saveProfiles($, all)
     if (renamed) {
-      const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[renamed]
-      await update($, grantsA, (gs: Record<string, VaultGrant>) => {
-        const { [renamed]: _, ...rest } = gs
-        return g ? { ...rest, [name]: g } : rest
+      await editAllGrants($, entries => {
+        if (entries[renamed]) { entries[name] = entries[renamed]; delete entries[renamed] }
       })
       await update($, selectedA, (sel: string) => (sel === renamed ? name : sel))
       await audit($, { event: 'rename-profile', profile: name, from: renamed })
     }
-    // the person edited the allowlist in the pane: it is trusted as written
-    const { allow } = await loadAllow($, cwd)
-    if (f.original && f.original !== name) delete allow[f.original]
-    if (f.allow) allow[name] = { mode: f.mode, ttlMinutes: f.ttl }
-    else delete allow[name]
-    await writeAllowTrusted($, allow)
+    const before = ((await read($, grantsA)) as Record<string, VaultGrant>)[name]
+    const want = f.allow ? f.mode : 'off'
+    if ((before?.mode ?? 'off') !== want) await setGrant($, name, want)
     await audit($, { event: 'save-profile', profile: name, allow: f.allow ? f.mode : false })
     await refreshProfiles($)
     await syncStatus($)
@@ -813,15 +819,7 @@ function actions($: EngineInterface): Actions {
     for (const f of all[n]?.secrets ?? []) await deleteSecret($, account(n, f))
     delete all[n]
     await saveProfiles($, all)
-    const { allow, raw } = await loadAllow($, cwd)
-    if (raw !== null && allow[n]) {
-      delete allow[n]
-      const rawNext = await saveAllow($, cwd, allow)
-      const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
-      if (trusted[cwd] === (await sha256(raw))) await $.store.set('trusted', { ...trusted, [cwd]: await sha256(rawNext) })
-      await update($, allowA, () => allow)
-    }
-    await revoke($, n)
+    await editAllGrants($, entries => { delete entries[n] })
     await audit($, { event: 'delete-profile', profile: n })
     await refreshProfiles($)
     await update($, viewA, () => 'list')
@@ -935,7 +933,7 @@ export const register: Register = on => {
     const grants = await activeGrants($)
     const out = Object.entries(profiles).map(([n, p]) => ({
       name: n, type: p.type, host: p.host, port: p.port, user: p.user, database: p.database,
-      granted: grants[n] ? { mode: grants[n].mode, expiresInMin: Math.round((grants[n].expiresAt - now()) / 60000) } : false,
+      granted: grants[n] ? { mode: grants[n].mode, directory: grants[n].dir } : false,
       description: p.description,
       auth: p.type === 'ssh' ? variantOf(p.type, p.variant).label : undefined,
       variables: Object.keys(namedVars(n, p)),
@@ -1042,22 +1040,17 @@ export const register: Register = on => {
     cwd = e.cwd
     await $.command.register({
       name: 'vault',
-      description: '凭证保险库：管理数据库/服务器/集群凭证与本会话授权',
-      argumentHint: '[trust|grant <p> [min]|revoke <p>|list|export|import]',
+      description: '凭证保险库：管理数据库/服务器/集群凭证与目录授权',
+      argumentHint: '[grant <p> [read|write]|revoke <p>|list|export|import]',
     })
     await refreshProfiles($)
     await loadUsage($)
-    await checkTrust($, true)
-    await syncStatus($)
+    await migrateLegacyAllowlist($)
+    await refreshGrants($)
     // grants survive a reload in $.state, the redaction table does not: reload it
     await warmRedaction($)
     await sweepRun($)
-    $.clock.every(60_000, async () => {
-      const grants = (await read($, grantsA)) as Record<string, VaultGrant>
-      const expired = Object.keys(grants).filter(n => grants[n].expiresAt <= now())
-      for (const n of expired) { await revoke($, n); $.ui.toast(`vault: ${n} 授权已到期`) }
-      await sweepRun($)
-    })
+    $.clock.every(60_000, () => void sweepRun($))
     return next(e)
   })
 
@@ -1071,31 +1064,28 @@ export const register: Register = on => {
     if (sub !== '' && sub !== 'list' && !byPerson) return { text: 'vault: 该子命令只能由用户本人在输入框执行。' }
     switch (sub) {
       case '': await openPane(); return { text: 'Vault 面板已打开。' }
-      case 'trust': {
-        const { raw } = await loadAllow($, cwd)
-        if (raw === null) return { text: `本项目没有 ${allowPath(cwd)}` }
-        await trust($)
-        return { text: `已信任 ${allowPath(cwd)}：\n${raw}` }
-      }
       case 'grant': {
-        const [name, min, mode] = rest
+        const [name, mode] = rest
         if (!name || !((await read($, profilesA)) as Record<string, VaultProfile>)[name]) return { text: `没有 profile: ${name ?? ''}` }
-        await grant($, name, mode === 'write' ? 'write' : 'read', Number(min) || 60, 'manual')
-        return { text: `已授权 ${name}（${mode === 'write' ? 'write' : 'read'}，${Number(min) || 60} 分钟，仅本会话）` }
+        const m = mode === 'write' ? 'write' : 'read'
+        await setGrant($, name, m)
+        return { text: `已授权 ${name}（${m === 'write' ? '读写' : '只读'}）给 ${cwd} 及其子目录，撤销前一直有效` }
       }
       case 'revoke': {
         if (!rest[0]) return { text: '用法: /vault revoke <profile>' }
-        await revoke($, rest[0])
-        return { text: `已撤销 ${rest[0]}` }
+        const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[rest[0]]
+        if (!g) return { text: `${rest[0]} 在当前目录没有授权` }
+        await setGrant($, rest[0], 'off', g.dir)
+        return { text: `已撤销 ${rest[0]} 在 ${g.dir} 的授权` }
       }
       case 'list': {
         const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
         const g = await activeGrants($)
-        return { text: Object.keys(profiles).map(n => `${g[n] ? '✅' : '  '} ${n} (${profiles[n].type})`).join('\n') || '(空)' }
+        return { text: Object.keys(profiles).map(n => `${g[n] ? `✅ ${g[n].mode}` : '  ─    '} ${n} (${profiles[n].type})`).join('\n') || '(空)' }
       }
       case 'export': await openPane('export'); return { text: '导出面板已打开。' }
       case 'import': await openPane(); await actions($).startImport(); return { text: '导入：请在弹窗中选择文件。' }
-      default: return { text: '用法: /vault [trust|grant <profile> [分钟] [read|write]|revoke <profile>|list|export|import]' }
+      default: return { text: '用法: /vault [grant <profile> [read|write]|revoke <profile>|list|export|import]' }
     }
   })
 
@@ -1105,9 +1095,9 @@ export const register: Register = on => {
       cols: e.props.bodyColumns,
       profiles: await read($, profilesA),
       stored: await read($, storedA),
-      allow: await read($, allowA),
       grants: await read($, grantsA),
-      trust: await read($, trustA),
+      dir: await read($, dirA),
+      allGrants: await read($, allGrantsA),
       view: await read($, viewA),
       selected: await read($, selectedA),
       form: await read($, formA),
@@ -1120,7 +1110,6 @@ export const register: Register = on => {
       probes: await read($, probesA),
       probing: await read($, probingA),
       usage: await read($, usageA),
-      grantDur: await read($, grantDurA),
       cleanup: await read($, cleanupA),
       surface: e.surface,
       now: now(),

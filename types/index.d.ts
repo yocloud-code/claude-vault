@@ -14,9 +14,13 @@ export type VaultProfile = {
   note?: string
 }
 
-export type VaultGrant = { mode: VaultMode; expiresAt: number; source: 'allowlist' | 'manual' }
+/** A profile granted to a directory and everything under it, until revoked. */
+export type VaultGrant = { mode: VaultMode; dir: string; at: number }
 
-export type VaultView = 'list' | 'edit' | 'export' | 'import' | 'audit' | 'cleanup'
+/** Grants by directory (real path), then by profile name. */
+export type VaultDirGrants = Record<string, Record<string, { mode: VaultMode; at: number }>>
+
+export type VaultView = 'list' | 'edit' | 'export' | 'import' | 'audit' | 'cleanup' | 'grants'
 
 export type VaultForm = {
   original?: string
@@ -33,7 +37,6 @@ export type VaultForm = {
   allow: boolean
   mode: VaultMode
   advanced: boolean
-  ttl: number
 }
 
 export type VaultImportItem = {
@@ -62,9 +65,9 @@ declare module 'claude-code' {
     vault: {
       profiles: Record<string, VaultProfile>
       stored: Record<string, boolean>
-      allow: Record<string, { mode: VaultMode; ttlMinutes?: number }>
       grants: Record<string, VaultGrant>
-      trust: 'none' | 'trusted' | 'untrusted'
+      dir: string
+      allGrants: VaultDirGrants
       view: VaultView
       selected: string
       form: VaultForm | null
@@ -77,7 +80,6 @@ declare module 'claude-code' {
       probes: Record<string, VaultProbe>
       probing: string
       usage: Record<string, VaultUsage>
-      grantDur: Record<string, number>
       cleanup: VaultCleanupItem[] | null
     }
   }

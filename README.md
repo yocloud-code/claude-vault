@@ -16,7 +16,7 @@
 - **Claude 只知道凭证的名字和用途**，例如 `prod-db (postgres, ro_user@10.0.0.5)`。
 - **密文只存 macOS 钥匙串**，由 Mod 在宿主进程里读取，并作为环境变量注入到命令里。
 - **输出回到模型前先脱敏**：明文、base64、URL 编码三种形式都替换成 `«vault:prod-db.password»`。
-- **按会话授权**：项目白名单 + 信任哈希，有效期到了自动收回。
+- **按目录授权**：授权给某个目录后，对该目录及其子目录长期有效，直到你撤销。
 - **带 UI 面板**：增删改凭证、设置密文、授权/撤销、导出/导入、审计日志都在面板里完成。
 
 ### 架构
@@ -24,14 +24,14 @@
 ```
 你 ──系统掩码输入框──▶ macOS 钥匙串（密文，service = claude-vault）
 ~/.claude/vault/profiles.json   元数据：名称、类型、主机、端口、用户、环境变量映射（无密文）
-<项目>/.claude/vault.json        白名单：本项目允许用哪些 profile、read/write 模式
+~/.claude/vault/grants.json     目录授权：哪个目录可以用哪些 profile、只读还是读写（不在任何仓库里）
                 │
       Mod（运行在 Claude Code 宿主进程，不在模型上下文里）
-   ├─ session.start      读白名单 → 校验信任哈希 → 授予本会话
+   ├─ session.start      读目录授权 → 计算当前目录生效的授权（含上级目录继承）
    ├─ mcp__vault__vault_list   列出 profile 名、类型、变量名（无密文）
    ├─ mcp__vault__vault_exec   {profile, command} → 注入环境变量执行 → 脱敏输出
    ├─ Bash 钩子          透明注入 + 拦截窥探命令 + 输出脱敏
-   ├─ 文件工具钩子        禁止 Read/Edit/Grep 访问 vault 目录、禁止模型修改 vault.json
+   ├─ 文件工具钩子        禁止 Read/Edit/Grep 访问 vault 目录（授权文件也在其中）
    ├─ session.append     最后一道防线：写入对话的每一行都脱敏
    ├─ /vault 命令 + 面板  管理、授权、导出导入、审计
    └─ ~/.claude/vault/audit.log  审计日志（不含明文）
@@ -93,13 +93,13 @@ claude --plugin-dir /path/to/claude-vault
 
 **2. 设置密文**：新建 profile 点「创建」后，会自动弹出第一个密文的系统**掩码输入框**（私钥、kubeconfig 这类文件密文则弹出文件选择），值直接写进钥匙串。之后也可以在编辑页点「设置」或「从文件读取」修改。
 
-改名 profile 时，钥匙串里的密文和本会话的授权会一起迁移到新名称，不会丢失。
+改名 profile 时，钥匙串里的密文和所有目录上的授权会一起迁移到新名称，不会丢失。
 
 **2.5 测试连接**：列表卡片和编辑页都有「测试连接」按钮，会按类型执行一条只读探测（SSH 执行 `true`、PostgreSQL `select 1`、Redis `ping`、Kubernetes 读 `/version`、HTTP 请求 Base URL 等），结果和耗时显示在卡片上。本机没装对应客户端时会提示「未安装 psql」。测试由你本人在面板里触发，不需要先授权。
 
 卡片上还会显示「最近使用 · 共 N 次」，数据来自审计日志里 Claude 实际调用的记录。缺少密文的 profile 不显示「授权」，而是显示「先设置密文」。
 
-**3. 授权给项目**：编辑页把「本项目授权」设为 `read` 或 `write`，会写进 `<项目>/.claude/vault.json`。
+**3. 授权给目录**：在列表卡片的「当前目录」一行点「只读」或「读写」，就授权给当前目录及其子目录；点「不授权」撤销。不用进编辑页。
 
 **4. 让 Claude 使用**：
 
@@ -117,16 +117,16 @@ psql -c 'select 1'
 
 ### 授权模型
 
-- 会话启动时，只有当 `vault.json` 的 SHA-256 与你上次信任时一致，才自动授权（默认 8 小时，可用 `ttlMinutes` 调整）。
-- clone 来的仓库，或被修改过的 `vault.json` → 面板显示「⚠ 白名单未信任」，需要你点「查看并信任」或运行 `/vault trust`。
-- 授权只对本会话有效，过期后自动收回并弹出提示。
+- **授权的对象是目录**，不是会话。授权给 `~/work/shop` 后，在这个目录和它的所有子目录里打开的会话都能用，**长期有效，没有时长**，直到你撤销。
+- 子目录可以覆盖上级目录：比如上级授权只读，子目录可以单独授权读写，离当前目录最近的那条生效。卡片上会显示「继承自 ~/work」。对继承来的授权点「不授权」，会撤销上级目录上的那条（它的所有子目录同时失效）。
+- 授权记录在 `~/.claude/vault/grants.json`，不在任何仓库里，所以 clone 来的项目不能给自己授权；Claude 的工具也读写不了这个文件。
+- 「授权管理」（快捷键 `g`）列出所有有授权的目录，可以逐条撤销；当前目录和对它生效的上级目录会标出来。
 - `read` 模式会拦截常见写操作（SQL DML/DDL、`kubectl apply/delete`、redis `set`……），但只是尽力而为。**真正的只读保证请用只读账号或只读 RBAC**。
+- 旧版本的项目白名单 `.claude/vault.json`：如果你以前信任过它，第一次打开时会自动迁移成该目录的授权；之后这个文件不再使用，可以删掉。
 
-`vault.json` 示例：
+### 一键清理
 
-```json
-{ "allow": { "prod-db": { "mode": "read" }, "k8s-prod": { "mode": "read", "ttlMinutes": 120 } } }
-```
+工具栏「🧹 一键清理」（快捷键 `c`）会先检查一遍，列出可以清理的内容，勾选后执行：失效的授权（profile 已删除或目录已不存在）、孤立的钥匙串条目、残留的临时文件、测试连接结果；「撤销当前目录的全部授权」和「清空审计日志」默认不勾选。不会删除任何 profile 或正在使用的密文。
 
 ### 环境变量的生命周期与冲突
 
@@ -137,7 +137,7 @@ psql -c 'select 1'
 | `vault_exec` 注入的变量 | 只设置在这一个子进程上，进程退出即消失；不写文件，不影响其他命令 |
 | Bash 注入的变量 | 写入 0600 临时 env 文件，命令开头 `source` 后立即删除；Bash 每条命令都是新 shell，命令结束变量就没了 |
 | `{secretfile:}` 临时文件 | 归属于发起它的命令，命令结束后删除。清理任务只删除无人认领（例如重载、崩溃留下的）且超过 15 分钟的文件，不会误删正在运行的命令的文件 |
-| 授权 | 到期、撤销或会话结束时收回；只在命令**启动时**检查，不会终止已在运行的进程 |
+| 授权 | 按目录长期有效，直到撤销；只在命令**启动时**检查，撤销不会终止已在运行的进程 |
 | 脱敏明文表 | 存在 Mod 内存中；授权时以及每次加载/热重载时，都会从钥匙串重新载入已授权 profile 的密文 |
 
 变量会被该命令启动的所有子进程继承；用 `nohup`、`&` 拉起的常驻进程会一直持有这些变量，直到它退出。
@@ -157,14 +157,13 @@ psql -c 'select 1'
 | --- | --- |
 | `/vault` | 打开面板 |
 | `/vault list` | 文字列出 profile 和授权状态 |
-| `/vault trust` | 信任当前项目的 `vault.json` |
-| `/vault grant <p> [分钟] [read\|write]` | 本会话临时授权 |
-| `/vault revoke <p>` | 撤销授权 |
+| `/vault grant <p> [read\|write]` | 授权给当前目录及其子目录 |
+| `/vault revoke <p>` | 撤销对当前目录生效的那条授权 |
 | `/vault export` / `/vault import` | 打开导出面板 / 选择文件导入 |
 
 除 `/vault` 和 `/vault list` 外，其他子命令只认你在输入框里亲手输入的。
 
-面板快捷键：`n` 新建 · `e` 编辑 · `t` 信任 · `x` 导出 · `i` 导入 · `l` 审计 · `s` 保存 · `b` 返回。
+面板快捷键：`n` 新建 · `e` 编辑 · `x` 导出 · `i` 导入 · `g` 授权管理 · `l` 审计 · `c` 一键清理 · `s` 保存 · `b` 返回。
 
 ### 导出 / 导入
 
@@ -183,7 +182,7 @@ tail -n +2 backup.cvault | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md 
 - `security find-generic-password` / `dump-keychain`、带 `-s claude-vault` 的钥匙串命令
 - 任何工具访问 `~/.claude/vault/`
 - 在注入了凭证的命令里执行 `env` / `printenv` / `set`
-- 模型编辑 `.claude/vault.json`
+- 模型修改授权：授权文件在 `~/.claude/vault/` 下，任何工具都读写不了；`/vault grant` 等命令只认你亲手输入的
 - 客户端变量里设置 `BASH_ENV`、`ENV`、`LD_PRELOAD`、`DYLD_*`、`PROMPT_COMMAND`、`PATH`、`NODE_OPTIONS` 等会让 shell 或解释器执行任意代码的变量：保存、导入和注入时都会拒绝（防止恶意模板文件借此执行代码）
 - `SSH_ASKPASS`、`GIT_SSH_COMMAND`、`EDITOR`、`PAGER` 这类"指定要执行的程序"的变量，只允许使用模板自带的值
 
@@ -232,7 +231,7 @@ Pasting database passwords, SSH keys or kubeconfigs into a conversation leaves t
 - **Claude only knows a credential's name and purpose**, e.g. `prod-db (postgres, ro_user@10.0.0.5)`.
 - **Secrets live only in the macOS Keychain.** The mod reads them in the host process and injects them into commands as environment variables.
 - **Output is redacted before the model sees it**: the raw value and its base64 and URL-encoded forms all become `«vault:prod-db.password»`.
-- **Per-session grants** come from a project allowlist plus a trust hash, and expire automatically.
+- **Grants belong to directories**: a profile granted to a directory works there and in every subdirectory, with no expiry, until you revoke it.
 - **A UI pane** covers create/edit/delete, setting secrets, grant/revoke, export/import, and the audit log.
 
 ### Architecture
@@ -240,14 +239,14 @@ Pasting database passwords, SSH keys or kubeconfigs into a conversation leaves t
 ```
 You ──native masked dialog──▶ macOS Keychain (secrets, service = claude-vault)
 ~/.claude/vault/profiles.json   metadata: name, type, host, port, user, env mapping (no secrets)
-<project>/.claude/vault.json     allowlist: which profiles this project may use, read/write mode
+~/.claude/vault/grants.json     directory grants: which directory may use which profiles, read or write (in no repository)
                 │
       Mod (runs in the Claude Code host process, outside the model's context)
-   ├─ session.start      read allowlist → verify trust hash → grant to this session
+   ├─ session.start      read directory grants → work out what applies here (parents included)
    ├─ mcp__vault__vault_list   profile names, types, env var names (no secrets)
    ├─ mcp__vault__vault_exec   {profile, command} → run with injected env → redacted output
    ├─ Bash hook          transparent injection + snooping guard + redaction
-   ├─ file-tool hook     blocks Read/Edit/Grep on the vault dir; the model may not edit vault.json
+   ├─ file-tool hook     blocks Read/Edit/Grep on the vault dir (the grants file included)
    ├─ session.append     last line of defence: every stored conversation row is redacted
    ├─ /vault + pane      manage, grant, export/import, audit
    └─ ~/.claude/vault/audit.log  audit log (no plaintext)
@@ -309,13 +308,13 @@ Placeholders for custom client variables:
 
 **2. Set the secret**: after "创建" (Create), the native **masked dialog** for the first secret opens on its own (a file picker for file secrets such as private keys and kubeconfigs), and the value goes straight to the Keychain. You can change it later with "设置" (Set) or "从文件读取" (From file) on the edit page.
 
-Renaming a profile carries its Keychain secrets and this session's grant over to the new name.
+Renaming a profile carries its Keychain secrets and its grants on every directory over to the new name.
 
 **2.5 Test the connection**: profile cards and the edit page have a "测试连接" (Test connection) button that runs a read-only probe for the type (SSH runs `true`, PostgreSQL `select 1`, Redis `ping`, Kubernetes reads `/version`, HTTP requests the base URL, …) and shows the result and timing on the card. A missing client tool is reported as such (e.g. "psql not installed"). You trigger the test yourself in the pane, so it needs no grant.
 
 Cards also show "last used · N times" from the audit log's record of Claude's actual calls. A profile with missing secrets shows "先设置密文" (Set secret first) instead of "授权" (Grant).
 
-**3. Allow it for the project**: set "本项目授权" (Project grant) to `read` or `write`; this writes `<project>/.claude/vault.json`.
+**3. Grant it to a directory**: on the card's "当前目录" (current directory) row, click "只读" (read) or "读写" (write) to grant it to the current directory and its subdirectories; "不授权" (none) revokes. No need to open the editor.
 
 **4. Let Claude use it**:
 
@@ -333,16 +332,16 @@ psql -c 'select 1'
 
 ### Authorization model
 
-- At session start, grants are applied only if the SHA-256 of `vault.json` matches the one you last trusted (default 8 h, adjustable with `ttlMinutes`).
-- A freshly cloned or modified `vault.json` shows "⚠ allowlist not trusted" until you click "查看并信任" (Review & trust) or run `/vault trust`.
-- Grants last for this session only and expire with a toast.
+- **Grants belong to a directory**, not to a session. A profile granted to `~/work/shop` is available to every session opened there or in any subdirectory, **with no expiry**, until you revoke it.
+- A subdirectory can override its parent (read above, write below): the nearest directory's grant wins, and the card shows "继承自 ~/work" (inherited from). Choosing "不授权" (none) on an inherited grant revokes it on the parent, for all of that parent's subdirectories.
+- Grants are stored in `~/.claude/vault/grants.json`, outside every repository, so a cloned project cannot grant itself, and Claude's tools cannot read or write the file.
+- "授权管理" (Grants, hotkey `g`) lists every directory with grants and revokes them one by one; the current directory and the parents that apply to it are marked.
 - `read` mode blocks common writes (SQL DML/DDL, `kubectl apply/delete`, redis `set`, …) on a best-effort basis. **For a real read-only guarantee, use a read-only DB user or RBAC role.**
+- The old per-project allowlist `.claude/vault.json`: if you had trusted it, it is migrated into grants on that directory the first time the project is opened; afterwards the file is unused and can be deleted.
 
-Example `vault.json`:
+### One-click cleanup
 
-```json
-{ "allow": { "prod-db": { "mode": "read" }, "k8s-prod": { "mode": "read", "ttlMinutes": 120 } } }
-```
+"🧹 一键清理" (hotkey `c`) checks first, lists what can be cleaned, and runs the items you tick: stale grants (deleted profile or missing directory), orphaned Keychain items, leftover temp files, connection-test results. "Revoke all grants of the current directory" and "clear the audit log" start unticked. No profile and no secret in use is ever removed.
 
 ### Variable lifecycle and conflicts
 
@@ -353,7 +352,7 @@ Example `vault.json`:
 | Variables from `vault_exec` | set on that one child process only and gone when it exits; no file, no effect on other commands |
 | Variables from Bash injection | written to a 0600 temp env file that is sourced and deleted at the start of the command; every Bash command is a fresh shell, so they end with it |
 | `{secretfile:}` temp files | owned by the command that created them and deleted when it ends. The sweep only removes files nobody owns (left by a reload or crash) once they are older than 15 minutes, so a running command never loses its files |
-| Grants | end on expiry, revoke or session end; checked only when a command **starts**, so running processes are not stopped |
+| Grants | last per directory until revoked; checked only when a command **starts**, so revoking does not stop running processes |
 | Redaction table | kept in mod memory, and reloaded from the Keychain for every granted profile on grant and on every load or hot reload |
 
 Child processes inherit the variables; a daemon started with `nohup` or `&` keeps them until it exits.
@@ -373,14 +372,13 @@ Child processes inherit the variables; a daemon started with `nohup` or `&` keep
 | --- | --- |
 | `/vault` | open the pane |
 | `/vault list` | list profiles and grants as text |
-| `/vault trust` | trust this project's `vault.json` |
-| `/vault grant <p> [minutes] [read\|write]` | grant for this session |
-| `/vault revoke <p>` | revoke a grant |
+| `/vault grant <p> [read\|write]` | grant to the current directory and its subdirectories |
+| `/vault revoke <p>` | revoke the grant that applies to the current directory |
 | `/vault export` / `/vault import` | open the export view / pick a file to import |
 
 Every subcommand except `/vault` and `/vault list` is accepted only when you type it yourself at the prompt.
 
-Pane hotkeys: `n` new · `e` edit · `t` trust · `x` export · `i` import · `l` audit · `s` save · `b` back.
+Pane hotkeys: `n` new · `e` edit · `x` export · `i` import · `g` grants · `l` audit · `c` cleanup · `s` save · `b` back.
 
 ### Export / import
 
@@ -399,7 +397,7 @@ tail -n +2 backup.cvault | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md 
 - `security find-generic-password` / `dump-keychain`, and Keychain commands with `-s claude-vault`
 - any tool touching `~/.claude/vault/`
 - `env` / `printenv` / `set` in a command that has credentials injected
-- the model editing `.claude/vault.json`
+- the model changing grants: the grants file lives under `~/.claude/vault/`, out of every tool's reach, and `/vault grant` and the like only accept what you type yourself
 - client variables that make a shell or interpreter run code (`BASH_ENV`, `ENV`, `LD_PRELOAD`, `DYLD_*`, `PROMPT_COMMAND`, `PATH`, `NODE_OPTIONS`, …): refused on save, on import and at injection, so a malicious template file cannot use them to run code
 - variables that name a program to run (`SSH_ASKPASS`, `GIT_SSH_COMMAND`, `EDITOR`, `PAGER`, …): only the values the templates themselves use
 

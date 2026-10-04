@@ -1,4 +1,4 @@
-import type { VaultProfile } from '../types'
+import type { VaultDirGrants, VaultGrant, VaultProfile } from '../types'
 import { namedVars, prefixOf } from './templates'
 
 export const aliasKey = prefixOf
@@ -44,7 +44,7 @@ export function selectProfiles(command: string, profiles: Record<string, VaultPr
     const owners = new Map<string, string[]>()
     for (const n of names) {
       if (!profiles[n]) return { deny: `vault: 没有名为 ${n} 的 profile。` }
-      if (!granted.has(n)) return { deny: `vault: profile ${n} 未授权给本会话。请让用户在 /vault 面板里授权。` }
+      if (!granted.has(n)) return { deny: `vault: profile ${n} 未授权给当前目录。请让用户在 /vault 面板里授权。` }
       const vars = varsOf(n, profiles[n])
       for (const k of Object.keys(vars)) owners.set(k, [...(owners.get(k) ?? []), n])
       picks.set(n, vars)
@@ -66,11 +66,28 @@ export function selectProfiles(command: string, profiles: Record<string, VaultPr
   for (const ref of refs) {
     const owner = Object.keys(profiles).find(n => ref in namedVars(n, profiles[n]))
     if (!owner) continue
-    if (!granted.has(owner)) return { deny: `vault: $${ref} 属于 profile ${owner}，它未授权给本会话。请让用户在 /vault 面板里授权。` }
+    if (!granted.has(owner)) return { deny: `vault: $${ref} 属于 profile ${owner}，它未授权给当前目录。请让用户在 /vault 面板里授权。` }
     const named = namedVars(owner, profiles[owner])
     const sel = picks.get(owner) ?? Object.fromEntries(Object.entries(named).filter(([, t]) => !isSecretTpl(t)))
     sel[ref] = named[ref]
     picks.set(owner, sel)
   }
   return { picks }
+}
+
+/**
+ * The grants in force for a directory: those given to it or to any directory above it. Where
+ * several apply to one profile, the nearest directory's wins (a subdirectory can narrow or widen
+ * what its parent allows).
+ */
+export const effectiveGrants = (all: VaultDirGrants, dir: string): Record<string, VaultGrant> => {
+  const out: Record<string, VaultGrant> = {}
+  for (const [d, entries] of Object.entries(all)) {
+    const under = dir === d || dir.startsWith(d.endsWith('/') ? d : `${d}/`)
+    if (!under) continue
+    for (const [n, g] of Object.entries(entries)) {
+      if (!out[n] || d.length > out[n].dir.length) out[n] = { mode: g.mode, dir: d, at: g.at }
+    }
+  }
+  return out
 }

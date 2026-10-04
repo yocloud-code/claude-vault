@@ -61,3 +61,20 @@ test('every template has a usable first variant', () => {
   for (const t of Object.values(TEMPLATES)) expect(t.variants.length).toBeGreaterThan(0)
   expect(TEMPLATES.ssh.variants.map(v => v.key)).toEqual(['key', 'password'])
 })
+
+test('directory grants apply to the directory and everything under it, nearest wins', async () => {
+  const { effectiveGrants } = await import('./select')
+  const all = {
+    '/w': { a: { mode: 'read' as const, at: 1 }, b: { mode: 'read' as const, at: 1 } },
+    '/w/proj': { b: { mode: 'write' as const, at: 2 } },
+    '/other': { c: { mode: 'read' as const, at: 3 } },
+    '/': { root: { mode: 'read' as const, at: 4 } },
+  }
+  const here = effectiveGrants(all, '/w/proj/src')
+  expect(Object.keys(here).sort()).toEqual(['a', 'b', 'root'])
+  expect(here.b).toEqual({ mode: 'write', dir: '/w/proj', at: 2 })
+  expect(here.a.dir).toBe('/w')
+  // a sibling whose name merely starts the same is not underneath
+  expect(Object.keys(effectiveGrants(all, '/w2'))).toEqual(['root'])
+  expect(Object.keys(effectiveGrants(all, '/w')).sort()).toEqual(['a', 'b', 'root'])
+})
