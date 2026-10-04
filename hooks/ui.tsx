@@ -279,26 +279,6 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
           <Text dimColor>或在 Bash 中直接引用专属变量；需要客户端变量时在首行写 #vault:{displayName}</Text>
         </Card>
 
-        <Card k="c-allow" title="当前目录授权">
-          <Box gap={1} flexWrap="wrap">
-            {(['off', 'read', 'write'] as const).map(m => {
-              const on = m === 'off' ? !f.allow : f.allow && f.mode === m
-              return (
-                <Button key={`al-${m}`} label={MODE_LABEL[m]} variant={on ? 'primary' : 'secondary'}
-                  onPress={() => a.formSet(m === 'off' ? { allow: false } : { allow: true, mode: m })} />
-              )
-            })}
-          </Box>
-          <Text dimColor>
-            {f.allow
-              ? `保存后授权给 ${tilde(s.dir || s.cwd)} 及其子目录（${f.mode === 'write' ? '读写' : '只读'}），撤销前一直有效`
-              : '不授权；以后可以在列表卡片上一键授权'}
-          </Text>
-          {f.type === 'ssh' && f.allow && f.mode === 'read'
-            ? <Text color="yellow">⚠ 只读模式不会拦截 SSH 上执行的命令。只想让 Claude 查看时，请在服务器上为它使用一个权限受限的账号。</Text>
-            : null}
-        </Card>
-
         <Toolbar>
           <Button key="f-save" label={editing ? '保存修改' : '创建'} hotkey="s" variant="primary" onPress={() => a.saveForm()} />
           <Button key="f-cancel" label="返回" hotkey="b" role="dismiss" onPress={() => a.go('list')} />
@@ -548,6 +528,9 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
                 ))
               )}
               {inherited ? <Text dimColor wrap="truncate-start">{`继承自 ${tilde(g.dir)}`}</Text> : null}
+              {p.type === 'ssh' && g?.mode === 'read'
+                ? <Text color="yellow">只读不会拦截 SSH 上执行的命令，建议在服务器上用受限账号</Text>
+                : null}
             </Box>
           )
           return (

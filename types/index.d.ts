@@ -34,8 +34,6 @@ export type VaultForm = {
   database: string
   secrets: string
   env: string
-  allow: boolean
-  mode: VaultMode
   advanced: boolean
 }
 

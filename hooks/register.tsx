@@ -612,7 +612,7 @@ const blankForm = (type = 'postgres'): VaultForm => {
   return {
     name: '', description: '', type, variant: v.key, host: '', port: t.port ? String(t.port) : '', user: '', database: '',
     secrets: v.secrets.map(x => x.name).join(','), env: envToText(v.env),
-    allow: false, mode: 'read', advanced: type === 'custom',
+    advanced: type === 'custom',
   }
 }
 
@@ -704,11 +704,10 @@ function actions($: EngineInterface): Actions {
   editProfile: async n => {
     const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
     if (!p) return
-    const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
     await update($, formA, () => ({
       original: n, name: n, description: p.description ?? '', type: p.type, variant: variantOf(p.type, p.variant).key, host: p.host ?? '', port: p.port ? String(p.port) : '', user: p.user ?? '',
       database: p.database ?? '', secrets: p.secrets.join(','), env: envToText(p.env),
-      allow: !!g, mode: g?.mode === 'write' ? 'write' : 'read', advanced: !isDefaultMapping(p),
+      advanced: !isDefaultMapping(p),
     }))
     await update($, confirmDeleteA, () => '')
     await update($, viewA, () => 'edit')
@@ -777,10 +776,7 @@ function actions($: EngineInterface): Actions {
       await update($, selectedA, (sel: string) => (sel === renamed ? name : sel))
       await audit($, { event: 'rename-profile', profile: name, from: renamed })
     }
-    const before = ((await read($, grantsA)) as Record<string, VaultGrant>)[name]
-    const want = f.allow ? f.mode : 'off'
-    if ((before?.mode ?? 'off') !== want) await setGrant($, name, want)
-    await audit($, { event: 'save-profile', profile: name, allow: f.allow ? f.mode : false })
+    await audit($, { event: 'save-profile', profile: name })
     await refreshProfiles($)
     await syncStatus($)
     await update($, formA, () => ({ ...f, name, original: name }))
