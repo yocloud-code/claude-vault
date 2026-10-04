@@ -167,9 +167,8 @@ psql -c 'select 1'
 
 ### 导出 / 导入
 
-- **仅元数据**：导出 `.json` 模板（没有密文），可以分享给团队。
-- **含密文**：导出 `.cvault` 加密包，格式是 `CLAUDE-VAULT-V1` 头 + openssl `AES-256-CBC` / `PBKDF2-SHA256 600000` 轮，内嵌 SHA-256 完整性校验，口令至少 12 位，文件权限 0600。
-- **导入**：选择文件 → 输入口令 → 预览每条是「新增 / 冲突 / 相同」，逐条选择导入、覆盖、跳过或另存为 `-imported` → 确认。**导入不会授权任何会话。**
+- **导出**：勾选 profile → 设置口令（至少 12 位，输两次）→ 选择保存位置，生成一个包含配置和密文的 `.cvault` 加密包。格式是 `CLAUDE-VAULT-V1` 头 + openssl `AES-256-CBC` / `PBKDF2-SHA256 600000` 轮，内嵌 SHA-256 完整性校验，口令至少 12 位，文件权限 0600。
+- **导入**：选择 `.cvault` 文件（也兼容旧版导出的 `.json` 模板）→ 输入口令 → 预览每条是「新增 / 冲突 / 相同」，逐条选择导入、覆盖、跳过或另存为 `-imported` → 确认。**导入不会授权任何目录。**
 - 不借助 Mod 手动解密：
 
 ```bash
@@ -382,9 +381,8 @@ Pane hotkeys: `n` new · `e` edit · `x` export · `i` import · `g` grants · `
 
 ### Export / import
 
-- **Metadata only**: exports a `.json` template with no secrets, safe to share with a team.
-- **With secrets**: exports a `.cvault` file: a `CLAUDE-VAULT-V1` header plus openssl `AES-256-CBC` with `PBKDF2-SHA256`, 600,000 iterations, an embedded SHA-256 integrity check, a passphrase of at least 12 characters, and file mode 0600.
-- **Import**: pick a file → enter the passphrase → preview each entry as new / conflict / same and choose import, overwrite, skip or save as `-imported` → confirm. **Importing never grants anything.**
+- **Export**: tick profiles → set a passphrase (at least 12 characters, typed twice) → choose where to save. The result is one `.cvault` file holding the configuration and the secrets: a `CLAUDE-VAULT-V1` header plus openssl `AES-256-CBC` with `PBKDF2-SHA256`, 600,000 iterations, an embedded SHA-256 integrity check, a passphrase of at least 12 characters, and file mode 0600.
+- **Import**: pick a `.cvault` file (`.json` templates from older versions still import) → enter the passphrase → preview each entry as new / conflict / same and choose import, overwrite, skip or save as `-imported` → confirm. **Importing never grants anything.**
 - Decrypt by hand without the mod:
 
 ```bash

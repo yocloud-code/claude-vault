@@ -72,7 +72,6 @@ declare module 'claude-code' {
       selected: string
       form: VaultForm | null
       exportSel: string[]
-      exportSecrets: boolean
       importPreview: VaultImportPreview | null
       confirmDelete: string
       notice: string

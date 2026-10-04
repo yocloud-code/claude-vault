@@ -50,7 +50,7 @@ const base = (view: PaneState['view'], cols: number, extra: Partial<PaneState> =
     '/Users/me/projects/demo': { 'k8s-prod': { mode: 'write', at: now - 3600000 } },
     '/Users/me/other': { 'old-db': { mode: 'read', at: now - 864000000 } },
   },
-  view, selected: 'prod-db', form: null, exportSel: ['prod-db'], exportSecrets: true,
+  view, selected: 'prod-db', form: null, exportSel: ['prod-db'],
   importPreview: null, confirmDelete: '', notice: '✔ 已授权 prod-db（本会话）',
   audit: ['10-04 12:01:02 grant prod-db', '10-04 12:03:10 exec prod-db psql -c "select 1"', '10-04 12:05:44 export prod-db'],
   probes: { 'prod-db': { ok: true, at: now - 120000, ms: 320, message: '' }, bastion: { ok: false, at: now, ms: 0, message: 'Permission denied (password).' } },

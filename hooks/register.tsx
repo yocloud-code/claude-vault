@@ -460,7 +460,6 @@ const viewA = atom({ plugin: 'vault', key: 'view' } as const, 'list')
 const selectedA = atom({ plugin: 'vault', key: 'selected' } as const, '')
 const formA = atom({ plugin: 'vault', key: 'form' } as const, null)
 const exportSelA = atom({ plugin: 'vault', key: 'exportSel' } as const, [])
-const exportSecretsA = atom({ plugin: 'vault', key: 'exportSecrets' } as const, false)
 const importA = atom({ plugin: 'vault', key: 'importPreview' } as const, null)
 const confirmDeleteA = atom({ plugin: 'vault', key: 'confirmDelete' } as const, '')
 const noticeA = atom({ plugin: 'vault', key: 'notice' } as const, '')
@@ -826,37 +825,32 @@ function actions($: EngineInterface): Actions {
     await notice($, `已删除 ${n}`)
   },
   toggleExport: n => void update($, exportSelA, (s: string[]) => (s.includes(n) ? s.filter(x => x !== n) : [...s, n])),
-  toggleExportSecrets: () => void update($, exportSecretsA, (v: boolean) => !v),
   doExport: async () => {
     const sel = (await read($, exportSelA)) as string[]
-    const withSecrets = (await read($, exportSecretsA)) as boolean
     const all = (await read($, profilesA)) as Record<string, VaultProfile>
     const profiles = Object.fromEntries(sel.filter(n => all[n]).map(n => [n, all[n]]))
     if (!Object.keys(profiles).length) return notice($, '没有选择任何 profile')
     const day = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-    const file = await chooseFileName($, '导出到', withSecrets ? `claude-vault-${day}.cvault` : `vault-template-${day}.json`)
+    // ask for the passphrase first: cancelling there leaves no half-made file behind
+    const pass = await askHidden($, '设置导出口令（至少 12 位，导入时需要）')
+    if (!pass) return notice($, '已取消')
+    if (pass.length < 12) return notice($, '口令至少 12 位')
+    if ((await askHidden($, '再次输入导出口令')) !== pass) return notice($, '两次口令不一致')
+    const file = await chooseFileName($, '导出到', `claude-vault-${day}.cvault`)
     if (!file) return notice($, '已取消')
     const bundle: Bundle = { version: 1, exportedAt: new Date().toISOString(), profiles }
-    if (!withSecrets) {
-      await writePrivate($, file, JSON.stringify(bundle, null, 2) + '\n')
-    } else {
-      const pass = await askHidden($, '设置导出口令（至少 12 位）')
-      if (!pass) return notice($, '已取消')
-      if (pass.length < 12) return notice($, '口令至少 12 位')
-      if ((await askHidden($, '再次输入导出口令')) !== pass) return notice($, '两次口令不一致')
-      const secrets: Record<string, string> = {}
-      for (const [n, p] of Object.entries(profiles)) for (const f of p.secrets) {
-        const v = await getSecret($, account(n, f))
-        if (v !== undefined) { secrets[`${n}.${f}`] = v; remember(`${n}.${f}`, v) }
-      }
-      await writePrivate($, file, await seal($, { ...bundle, secrets }, pass))
+    const secrets: Record<string, string> = {}
+    for (const [n, p] of Object.entries(profiles)) for (const f of p.secrets) {
+      const v = await getSecret($, account(n, f))
+      if (v !== undefined) { secrets[`${n}.${f}`] = v; remember(`${n}.${f}`, v) }
     }
-    await audit($, { event: 'export', profiles: Object.keys(profiles), file, withSecrets })
+    await writePrivate($, file, await seal($, { ...bundle, secrets }, pass))
+    await audit($, { event: 'export', profiles: Object.keys(profiles), file, secrets: Object.keys(secrets).length })
     await update($, viewA, () => 'list')
     await notice($, `已导出 ${Object.keys(profiles).length} 个 profile → ${file}`)
   },
   startImport: async () => {
-    const file = await chooseFile($, '选择 .cvault 或 vault 模板 .json')
+    const file = await chooseFile($, '选择要导入的 .cvault 文件')
     if (!file) return notice($, '已取消')
     let text = ''
     try { text = await $.fs.read(file) } catch { return notice($, '读取文件失败') }
@@ -1102,7 +1096,6 @@ export const register: Register = on => {
       selected: await read($, selectedA),
       form: await read($, formA),
       exportSel: await read($, exportSelA),
-      exportSecrets: await read($, exportSecretsA),
       importPreview: await read($, importA),
       confirmDelete: await read($, confirmDeleteA),
       notice: await read($, noticeA),

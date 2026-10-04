@@ -14,7 +14,6 @@ export type PaneState = {
   selected: string
   form: VaultForm | null
   exportSel: string[]
-  exportSecrets: boolean
   importPreview: VaultImportPreview | null
   confirmDelete: string
   notice: string
@@ -45,7 +44,6 @@ export type Actions = {
   askDelete: (name: string) => void
   doDelete: (name: string) => void
   toggleExport: (name: string) => void
-  toggleExportSecrets: () => void
   doExport: () => void
   startImport: () => void
   importAction: (name: string, action: string) => void
@@ -328,12 +326,9 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
             </Box>
           ))}
         </Card>
-        <Card k="c-kind" title="导出内容">
-          <Button key="x-meta" plain label={`${s.exportSecrets ? '○' : '◉'}  仅元数据 — 团队模板 .json，可安全分享`} onPress={() => s.exportSecrets && a.toggleExportSecrets()} />
-          <Button key="x-secrets" plain label={`${s.exportSecrets ? '◉' : '○'}  包含密文 — .cvault 加密备份，需要口令`} onPress={() => !s.exportSecrets && a.toggleExportSecrets()} />
-        </Card>
+        <Text dimColor>导出为 .cvault 加密包，包含配置和密文；需要设置口令（至少 12 位），导入时输入同一个口令。</Text>
         <Toolbar>
-          <Button key="x-go" label={`导出 ${s.exportSel.length} 项`} variant="primary" hotkey="x" onPress={() => a.doExport()} />
+          <Button key="x-go" label={`导出 ${s.exportSel.length} 项`} variant="primary" hotkey="x" onPress={() => s.exportSel.length && a.doExport()} />
           <Button key="x-back" label="返回" hotkey="b" role="dismiss" onPress={() => a.go('list')} />
         </Toolbar>
       </Box>
