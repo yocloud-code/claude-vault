@@ -1,13 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProfile, VaultView } from '../types'
-import { hasSecrets, redact, redactDeep, remember } from './redact'
+import type { VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
+import { hasSecretsDeep, redact, redactDeep, remember } from './redact'
 import { dumpReason, isAllowFile, isVaultPath, peekReason, writeReason } from './guard'
 import { HEADER, ITER, envelope, isSealed, parsePlain, sealedBody, unwrap } from './transfer'
 import type { Bundle } from './transfer'
 import { renderPane } from './ui'
 import { aliasKey, namedClash, selectProfiles, varsOf } from './select'
-import { envToText, isDefaultMapping, missingFields, namedVars, parseEnv, templateOf, variantOf } from './templates'
+import { envProblem, envProblems, envToText, exampleFor, isDefaultMapping, missingFields, namedVars, parseEnv, templateOf, variantOf } from './templates'
 import type { Actions } from './ui'
 
 // ---------- keychain ----------
@@ -166,7 +166,7 @@ async function sweepRun($: EngineInterface) {
 
 const rand = () => [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(16).padStart(2, '0')).join('')
 
-type Resolved = { env: Record<string, string>; files: string[]; missing: string[] }
+type Resolved = { env: Record<string, string>; files: string[]; missing: string[]; blocked: string[] }
 
 // The SSH_ASKPASS helper: prints $SSHPASS, which only the one ssh child carries. No secret in the file.
 async function askpassPath($: EngineInterface) {
@@ -185,6 +185,8 @@ async function resolveEnv($: EngineInterface, name: string, p: VaultProfile, onl
   const env: Record<string, string> = {}
   const files: string[] = []
   const missing: string[] = []
+  const blocked: string[] = []
+  const own = new Set(Object.keys(namedVars(name, p, true)))
   const cache = new Map<string, string | undefined>()
   const secret = async (field: string) => {
     if (!cache.has(field)) {
@@ -196,6 +198,7 @@ async function resolveEnv($: EngineInterface, name: string, p: VaultProfile, onl
   }
 
   for (const [key, tpl] of Object.entries(p.env)) {
+    if (!own.has(key) && envProblem(key, tpl)) { blocked.push(key); continue }
     if (only && !only.has(key)) continue
     let out = ''
     let ok = true
@@ -220,7 +223,7 @@ async function resolveEnv($: EngineInterface, name: string, p: VaultProfile, onl
     }
     if (ok) env[key] = out
   }
-  return { env, files, missing }
+  return { env, files, missing, blocked }
 }
 
 // Loads the secrets of every granted profile into the redaction table, so output stays masked
@@ -232,6 +235,21 @@ async function warmRedaction($: EngineInterface) {
       const v = await getSecret($, account(n, f))
       if (v !== undefined) remember(`${n}.${f}`, v)
     }
+  }
+}
+
+// Runs a command with one profile's variables (its own and its client's). Refuses before running
+// when a secret is missing or a client variable is not allowed; temp files go when it ends.
+async function runWithProfile($: EngineInterface, name: string, p: VaultProfile, command: string, timeoutMs: number) {
+  const r = await resolveEnv($, name, { ...p, env: varsOf(name, p) })
+  try {
+    if (r.blocked.length) return { deny: `vault: profile ${name} 的客户端变量 ${r.blocked.join(', ')} 不允许设置，请在 /vault 面板里修改。` }
+    if (r.missing.length) return { deny: `vault: 钥匙串里缺少密文 ${r.missing.join(', ')}，请在 /vault 面板里设置。` }
+    const started = now()
+    const ran = await $.process.run(['/bin/bash', '-c', command], { env: r.env, timeoutMs })
+    return { ...ran, ms: now() - started }
+  } finally {
+    await removeFiles($, r.files)
   }
 }
 
@@ -274,6 +292,9 @@ const importA = atom({ plugin: 'vault', key: 'importPreview' } as const, null)
 const confirmDeleteA = atom({ plugin: 'vault', key: 'confirmDelete' } as const, '')
 const noticeA = atom({ plugin: 'vault', key: 'notice' } as const, '')
 const auditA = atom({ plugin: 'vault', key: 'audit' } as const, [])
+const probesA = atom({ plugin: 'vault', key: 'probes' } as const, {})
+const probingA = atom({ plugin: 'vault', key: 'probing' } as const, '')
+const usageA = atom({ plugin: 'vault', key: 'usage' } as const, {})
 
 let cwd = ''
 // decrypted import bundle: module memory only, never $.state
@@ -285,16 +306,55 @@ function notice($: EngineInterface, text: string) {
     : /失败|错误|不一致|至少|只能|没有|损坏|缺少/.test(text) ? `✖ ${text}`
     : /取消/.test(text) ? `ℹ ${text}`
     : `✔ ${text}`
+  if (tagged.startsWith('✔')) {
+    $.clock.after(6000, () => void update($, noticeA, (n: string) => (n === tagged ? '' : n)))
+  }
   return update($, noticeA, () => tagged)
 }
 
+// Appends run one after another: the log is read, extended and rewritten, so two concurrent
+// appends (parallel tool calls, the expiry timer) would otherwise drop one of the lines.
+let auditQueue: Promise<void> = Promise.resolve()
+
 async function audit($: EngineInterface, entry: Record<string, unknown>) {
+  const write = async () => {
+    const { audit: file } = await paths($)
+    let old = ''
+    try { old = await $.fs.read(file) } catch {}
+    const line = JSON.stringify({ t: new Date().toISOString(), cwd, ...entry })
+    const lines = (old + redact(line) + '\n').split('\n').filter(Boolean).slice(-2000)
+    await writePrivate($, file, lines.join('\n') + '\n')
+  }
+  const done = auditQueue.then(write, write)
+  auditQueue = done.catch(() => {})
+  await done
+  const used = entry.event === 'exec' ? [entry.profile] : entry.event === 'bash' ? (entry.profiles as string[]) : []
+  if (used.length) {
+    const at = now()
+    await update($, usageA, (u: Record<string, VaultUsage>) => {
+      const next = { ...u }
+      for (const n of used as string[]) next[n] = { count: (next[n]?.count ?? 0) + 1, last: at }
+      return next
+    })
+  }
+}
+
+// Usage per profile from the audit log's exec and bash events.
+async function loadUsage($: EngineInterface) {
   const { audit: file } = await paths($)
-  let old = ''
-  try { old = await $.fs.read(file) } catch {}
-  const line = JSON.stringify({ t: new Date().toISOString(), cwd, ...entry })
-  const lines = (old + redact(line) + '\n').split('\n').filter(Boolean).slice(-2000)
-  await writePrivate($, file, lines.join('\n') + '\n')
+  const usage: Record<string, VaultUsage> = {}
+  let text = ''
+  try { text = await $.fs.read(file) } catch {}
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    try {
+      const j = JSON.parse(line) as { t: string; event: string; profile?: string; profiles?: string[] }
+      const names = j.event === 'exec' && j.profile ? [j.profile] : j.event === 'bash' ? (j.profiles ?? []) : []
+      const at = Date.parse(j.t)
+      for (const n of names) usage[n] = { count: (usage[n]?.count ?? 0) + 1, last: Math.max(usage[n]?.last ?? 0, at) }
+    } catch {}
+  }
+  await update($, usageA, () => usage)
 }
 
 async function refreshProfiles($: EngineInterface) {
@@ -429,7 +489,35 @@ const blankForm = (type = 'postgres'): VaultForm => {
 }
 
 function actions($: EngineInterface): Actions {
-  return {
+  const acts: Actions = {
+  probe: async n => {
+    const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
+    const v = p && variantOf(p.type, p.variant)
+    if (!p || !v?.probe) return notice($, `${n} 的类型不支持测试连接`)
+    await update($, probingA, () => n)
+    let result: VaultProbe
+    try {
+      const ran = await runWithProfile($, n, p, exampleFor(v.probe, n), 30_000)
+      if ('deny' in ran) result = { ok: false, at: now(), ms: 0, message: ran.deny.replace(/^vault: /, '') }
+      else {
+        const tool = exampleFor(v.probe, n).split(' ')[0]
+        const err = (ran.stderr || ran.stdout).trim()
+        result = {
+          ok: ran.exitCode === 0, at: now(), ms: ran.ms,
+          message: ran.exitCode === 0 ? '' : ran.exitCode === 127 ? `本机未安装 ${tool}` : redact(err).slice(0, 200) || `退出码 ${ran.exitCode}`,
+        }
+      }
+    } catch (err) {
+      result = { ok: false, at: now(), ms: 0, message: redact(String(err)).slice(0, 200) }
+    }
+    await update($, probesA, (ps: Record<string, VaultProbe>) => ({ ...ps, [n]: result }))
+    await update($, probingA, () => '')
+    await audit($, { event: 'probe', profile: n, ok: result.ok, ms: result.ms })
+  },
+  copy: async (text, surface) => {
+    const r = await $.ui.copy({ text, surface })
+    await notice($, r.isCopied ? '已复制到剪贴板' : '✖ 复制失败（当前界面不支持剪贴板）')
+  },
   go: async (view: VaultView) => {
     await update($, noticeA, () => '')
     if (view === 'audit') {
@@ -450,7 +538,10 @@ function actions($: EngineInterface): Actions {
   grant: async n => {
     const allow = (await read($, allowA)) as Allow
     await grant($, n, allow[n]?.mode === 'write' ? 'write' : 'read', allow[n]?.ttlMinutes ?? 60, 'manual')
-    await notice($, `已授权 ${n}（本会话）`)
+    const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
+    const stored = (await read($, storedA)) as Record<string, boolean>
+    const unset = (p?.secrets ?? []).filter(x => !stored[`${n}.${x}`])
+    await notice($, unset.length ? `⚠ 已授权 ${n}，但还缺少密文：${unset.join('、')}` : `已授权 ${n}（本会话）`)
   },
   revoke: async n => { await revoke($, n); await notice($, `已撤销 ${n}`) },
   trust: () => void trust($),
@@ -497,6 +588,8 @@ function actions($: EngineInterface): Actions {
       ? f.secrets.split(',').map(x => x.trim()).filter(x => /^[A-Za-z0-9_-]+$/.test(x))
       : v.secrets.map(x => x.name)
     if (custom && !secrets.length) return notice($, '至少需要一个密文字段')
+    const problems = custom ? envProblems(parseEnv(f.env)) : []
+    if (problems.length) return notice($, problems.join('；'))
     const profile: VaultProfile = {
       type: f.type, variant: t.variants.length > 1 ? v.key : undefined,
       description: f.description.trim() || undefined, host: val('host'), user: val('user'), database: val('database'),
@@ -509,9 +602,28 @@ function actions($: EngineInterface): Actions {
     if (same) return notice($, `名称 ${name} 和已有的 ${same} 会生成相同的变量前缀 ${aliasKey(name)}_，请换一个名称`)
     const clash = namedClash(name, profile, others)
     if (clash) return notice($, `变量 ${clash.variable} 和已有的 ${clash.other} 重名，请换一个名称或密文字段名`)
-    if (f.original && f.original !== name) delete all[f.original]
+    const renamed = f.original && f.original !== name ? f.original : ''
+    if (renamed) {
+      // Keychain items are keyed `<name>.<field>`: carry every secret over to the new name
+      for (const field of all[renamed]?.secrets ?? []) {
+        const old = await getSecret($, account(renamed, field))
+        if (old === undefined) continue
+        if (secrets.includes(field)) await setSecret($, account(name, field), old)
+        await deleteSecret($, account(renamed, field))
+      }
+      delete all[renamed]
+    }
     all[name] = profile
     await saveProfiles($, all)
+    if (renamed) {
+      const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[renamed]
+      await update($, grantsA, (gs: Record<string, VaultGrant>) => {
+        const { [renamed]: _, ...rest } = gs
+        return g ? { ...rest, [name]: g } : rest
+      })
+      await update($, selectedA, (sel: string) => (sel === renamed ? name : sel))
+      await audit($, { event: 'rename-profile', profile: name, from: renamed })
+    }
     // the person edited the allowlist in the pane: it is trusted as written
     const { allow } = await loadAllow($, cwd)
     if (f.original && f.original !== name) delete allow[f.original]
@@ -526,7 +638,14 @@ function actions($: EngineInterface): Actions {
     await refreshProfiles($)
     await syncStatus($)
     await update($, formA, () => ({ ...f, name, original: name }))
-    await notice($, `已保存 ${name}${profile.secrets.length ? '，下一步：设置密文' : ''}`)
+    const stored = (await read($, storedA)) as Record<string, boolean>
+    const unset = profile.secrets.filter(x => !stored[`${name}.${x}`])
+    await notice($, `已保存 ${name}${unset.length ? `，还需设置：${unset.join('、')}` : ''}`)
+    // a new profile goes straight on to its first secret, saving a click
+    if (!f.original && unset.length) {
+      const def = v.secrets.find(d => d.name === unset[0])
+      await (def?.file ? acts.setSecretFromFile(name, unset[0]) : acts.setSecret(name, unset[0]))
+    }
   },
   setSecret: async (n, field) => {
     const v = await askHidden($, `请输入 ${n}.${field} 的值（只保存到 macOS 钥匙串，Claude 看不到）`)
@@ -553,6 +672,14 @@ function actions($: EngineInterface): Actions {
     for (const f of all[n]?.secrets ?? []) await deleteSecret($, account(n, f))
     delete all[n]
     await saveProfiles($, all)
+    const { allow, raw } = await loadAllow($, cwd)
+    if (raw !== null && allow[n]) {
+      delete allow[n]
+      const rawNext = await saveAllow($, cwd, allow)
+      const trusted = ((await $.store.get('trusted')) ?? {}) as Record<string, string>
+      if (trusted[cwd] === (await sha256(raw))) await $.store.set('trusted', { ...trusted, [cwd]: await sha256(rawNext) })
+      await update($, allowA, () => allow)
+    }
     await revoke($, n)
     await audit($, { event: 'delete-profile', profile: n })
     await refreshProfiles($)
@@ -615,6 +742,8 @@ function actions($: EngineInterface): Actions {
         return {
           name: n, status, action: status === 'new' ? 'add' : status === 'same' ? 'overwrite' : 'skip',
           secretCount: Object.keys(bundle.secrets ?? {}).filter(k => k.startsWith(n + '.')).length,
+          clientVars: Object.keys(p.env ?? {}),
+          problems: envProblems(p.env ?? {}),
         } as VaultImportPreview['items'][number]
       }),
     }
@@ -632,6 +761,7 @@ function actions($: EngineInterface): Actions {
     const clashes: string[] = []
     for (const it of p.items) {
       if (it.action === 'skip') continue
+      if (envProblems(bundle.profiles[it.name].env ?? {}).length) { clashes.push(`${it.name}（含不允许的客户端变量）`); continue }
       const target = it.action === 'rename' ? `${it.name}-imported` : it.name
       if (Object.keys(all).some(o => o !== target && aliasKey(o) === aliasKey(target)) || namedClash(target, bundle.profiles[it.name], all)) { clashes.push(target); continue }
       all[target] = bundle.profiles[it.name]
@@ -648,12 +778,13 @@ function actions($: EngineInterface): Actions {
     await refreshProfiles($)
     await update($, viewA, () => 'list')
     await notice($, clashes.length
-      ? `⚠ 已导入 ${done.length} 个；${clashes.join('、')} 与已有名称生成的变量名重复，已跳过`
+      ? `⚠ 已导入 ${done.length} 个；跳过：${clashes.join('、')}`
       : `已导入 ${done.length} 个 profile（未授权任何会话）`)
   },
   cancelImport: async () => { pendingBundle = null; await update($, importA, () => null); await update($, viewA, () => 'list') },
   close: () => void $.ui.close({ id: PANE }),
   }
+  return acts
 }
 
 
@@ -678,24 +809,16 @@ export const register: Register = on => {
     if (peek) return { deny: peek }
     const c = await checkUse($, profile, command)
     if ('deny' in c) return { deny: c.deny! }
-    const r = await resolveEnv($, profile, { ...c.p, env: varsOf(profile, c.p) })
-    if (r.missing.length) {
-      await removeFiles($, r.files)
-      return { deny: `vault: 钥匙串里缺少密文 ${r.missing.join(', ')}，请让用户在 /vault 面板里设置。` }
-    }
-    const started = now()
+    const timeoutMs = Math.min(600, timeoutSec ?? 120) * 1000
     try {
-      const ran = await $.process.run(['/bin/bash', '-lc', command], {
-        env: r.env, cwd: dir, timeoutMs: Math.min(600, timeoutSec ?? 120) * 1000,
-      })
-      await audit($, { event: 'exec', profile, command: command.slice(0, 120), exit: ran.exitCode, ms: now() - started })
+      const ran = await runWithProfile($, profile, c.p, dir ? `cd ${shq(dir)} && ${command}` : command, timeoutMs)
+      if ('deny' in ran) return { deny: ran.deny }
+      await audit($, { event: 'exec', profile, command: command.slice(0, 120), exit: ran.exitCode, ms: ran.ms })
       const text = `exit code: ${ran.exitCode}\n--- stdout ---\n${ran.stdout}${ran.stderr ? `\n--- stderr ---\n${ran.stderr}` : ''}`
       return { result: redact(text) }
     } catch (err) {
       await audit($, { event: 'exec', profile, command: command.slice(0, 120), error: String(err).slice(0, 200) })
       return { result: redact(`vault_exec failed: ${String(err)}`) }
-    } finally {
-      await removeFiles($, r.files)
     }
   })
 
@@ -726,6 +849,7 @@ export const register: Register = on => {
       if ('deny' in c) { await removeFiles($, files); return { deny: c.deny! } }
       const r = await resolveEnv($, n, { ...c.p, env: vars })
       files.push(...r.files)
+      if (r.blocked.length) { await removeFiles($, files); return { deny: `vault: profile ${n} 的客户端变量 ${r.blocked.join(', ')} 不允许设置，请在 /vault 面板里修改。` } }
       if (r.missing.length) { await removeFiles($, files); return { deny: `vault: 钥匙串里缺少密文 ${r.missing.join(', ')}。` } }
       Object.assign(env, r.env)
     }
@@ -761,15 +885,14 @@ export const register: Register = on => {
     }
     const ran = await next(e)
     if ('deny' in ran && ran.deny !== undefined) return ran
-    const probe = typeof ran.text === 'string' ? ran.text : JSON.stringify(ran.result ?? '')
-    if (!hasSecrets(probe)) return ran
+    if (!hasSecretsDeep(ran.result) && !(typeof ran.text === 'string' && hasSecretsDeep(ran.text))) return ran
     return { result: redactDeep(ran.result), ...(ran.context ? { context: ran.context } : {}) } as typeof ran
   })
 
   // last line of defence: every row the conversation keeps
   on('session.append', ($, e, next) => {
     const content = (e.message as { content?: unknown }).content
-    if (content === undefined || !hasSecrets(JSON.stringify(content))) return next(e)
+    if (content === undefined || !hasSecretsDeep(content)) return next(e)
     return next({ ...e, message: { ...e.message, content: redactDeep(content) } } as typeof e)
   })
 
@@ -782,6 +905,7 @@ export const register: Register = on => {
       argumentHint: '[trust|grant <p> [min]|revoke <p>|list|export|import]',
     })
     await refreshProfiles($)
+    await loadUsage($)
     await checkTrust($, true)
     await syncStatus($)
     // grants survive a reload in $.state, the redaction table does not: reload it
@@ -818,7 +942,11 @@ export const register: Register = on => {
         await grant($, name, mode === 'write' ? 'write' : 'read', Number(min) || 60, 'manual')
         return { text: `已授权 ${name}（${mode === 'write' ? 'write' : 'read'}，${Number(min) || 60} 分钟，仅本会话）` }
       }
-      case 'revoke': if (rest[0]) await revoke($, rest[0]); return { text: `已撤销 ${rest[0] ?? ''}` }
+      case 'revoke': {
+        if (!rest[0]) return { text: '用法: /vault revoke <profile>' }
+        await revoke($, rest[0])
+        return { text: `已撤销 ${rest[0]}` }
+      }
       case 'list': {
         const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
         const g = await activeGrants($)
@@ -848,6 +976,10 @@ export const register: Register = on => {
       confirmDelete: await read($, confirmDeleteA),
       notice: await read($, noticeA),
       audit: await read($, auditA),
+      probes: await read($, probesA),
+      probing: await read($, probingA),
+      usage: await read($, usageA),
+      surface: e.surface,
       now: now(),
     } as any, actions($))
   })

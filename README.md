@@ -91,7 +91,13 @@ claude --plugin-dir /path/to/claude-vault
 | `{secret:字段}` | 从钥匙串取出的值，直接作为变量值 |
 | `{secretfile:字段}` | 取出后写入 0600 临时文件，变量值是文件路径，命令结束后删除（适合私钥、kubeconfig） |
 
-**2. 设置密文**：保存后，在编辑页点「设置」，会弹出系统的**掩码输入框**，值直接写进钥匙串。多行内容（私钥、kubeconfig）用「从文件读」。
+**2. 设置密文**：新建 profile 点「创建」后，会自动弹出第一个密文的系统**掩码输入框**（私钥、kubeconfig 这类文件密文则弹出文件选择），值直接写进钥匙串。之后也可以在编辑页点「设置」或「从文件读取」修改。
+
+改名 profile 时，钥匙串里的密文和本会话的授权会一起迁移到新名称，不会丢失。
+
+**2.5 测试连接**：列表卡片和编辑页都有「测试连接」按钮，会按类型执行一条只读探测（SSH 执行 `true`、PostgreSQL `select 1`、Redis `ping`、Kubernetes 读 `/version`、HTTP 请求 Base URL 等），结果和耗时显示在卡片上。本机没装对应客户端时会提示「未安装 psql」。测试由你本人在面板里触发，不需要先授权。
+
+卡片上还会显示「最近使用 · 共 N 次」，数据来自审计日志里 Claude 实际调用的记录。缺少密文的 profile 不显示「授权」，而是显示「先设置密文」。
 
 **3. 授权给项目**：编辑页把「本项目授权」设为 `read` 或 `write`，会写进 `<项目>/.claude/vault.json`。
 
@@ -178,8 +184,11 @@ tail -n +2 backup.cvault | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md 
 - 任何工具访问 `~/.claude/vault/`
 - 在注入了凭证的命令里执行 `env` / `printenv` / `set`
 - 模型编辑 `.claude/vault.json`
+- 客户端变量里设置 `BASH_ENV`、`ENV`、`LD_PRELOAD`、`DYLD_*`、`PROMPT_COMMAND`、`PATH`、`NODE_OPTIONS` 等会让 shell 或解释器执行任意代码的变量：保存、导入和注入时都会拒绝（防止恶意模板文件借此执行代码）
+- `SSH_ASKPASS`、`GIT_SSH_COMMAND`、`EDITOR`、`PAGER` 这类"指定要执行的程序"的变量，只允许使用模板自带的值
 
 **已知限制：**
+- 只读模式只对数据库、Redis、kubectl 生效，**不拦截 SSH 上执行的命令**；编辑页对 SSH 选只读时会提示。只想让 Claude 查看服务器时，请为它使用权限受限的账号。
 - 脱敏基于已知明文的字符串匹配；被模型先变换再输出的形式（如逐字符拆开、hex）无法识别。
 - 导出口令通过子进程环境变量传给 openssl，同一用户的进程理论上能读到。
 - 改写后的 Bash 命令里会出现临时 env 文件路径；文件在命令开头就被 source 后删除，另有定时清理。
@@ -298,7 +307,13 @@ Placeholders for custom client variables:
 | `{secret:field}` | value from the Keychain, used as the variable's value |
 | `{secretfile:field}` | value written to a 0600 temp file; the variable holds its path; deleted after the command (for keys, kubeconfigs) |
 
-**2. Set the secret**: after saving, click "设置" (Set) on the edit page. A native **masked dialog** opens and the value goes straight to the Keychain. Use "从文件读" (From file) for multi-line values.
+**2. Set the secret**: after "创建" (Create), the native **masked dialog** for the first secret opens on its own (a file picker for file secrets such as private keys and kubeconfigs), and the value goes straight to the Keychain. You can change it later with "设置" (Set) or "从文件读取" (From file) on the edit page.
+
+Renaming a profile carries its Keychain secrets and this session's grant over to the new name.
+
+**2.5 Test the connection**: profile cards and the edit page have a "测试连接" (Test connection) button that runs a read-only probe for the type (SSH runs `true`, PostgreSQL `select 1`, Redis `ping`, Kubernetes reads `/version`, HTTP requests the base URL, …) and shows the result and timing on the card. A missing client tool is reported as such (e.g. "psql not installed"). You trigger the test yourself in the pane, so it needs no grant.
+
+Cards also show "last used · N times" from the audit log's record of Claude's actual calls. A profile with missing secrets shows "先设置密文" (Set secret first) instead of "授权" (Grant).
 
 **3. Allow it for the project**: set "本项目授权" (Project grant) to `read` or `write`; this writes `<project>/.claude/vault.json`.
 
@@ -385,8 +400,11 @@ tail -n +2 backup.cvault | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md 
 - any tool touching `~/.claude/vault/`
 - `env` / `printenv` / `set` in a command that has credentials injected
 - the model editing `.claude/vault.json`
+- client variables that make a shell or interpreter run code (`BASH_ENV`, `ENV`, `LD_PRELOAD`, `DYLD_*`, `PROMPT_COMMAND`, `PATH`, `NODE_OPTIONS`, …): refused on save, on import and at injection, so a malicious template file cannot use them to run code
+- variables that name a program to run (`SSH_ASKPASS`, `GIT_SSH_COMMAND`, `EDITOR`, `PAGER`, …): only the values the templates themselves use
 
 **Known limits:**
+- Read-only mode applies to databases, Redis and kubectl; it **does not restrict commands run over SSH**, and the edit page says so when SSH is set to read-only. To let Claude only look at a server, give it a restricted account there.
 - Redaction matches known plaintext strings; values the model transforms before printing (split into characters, hex) are not caught.
 - The export passphrase reaches openssl through the child's environment, which other processes of the same user could in principle read.
 - A rewritten Bash command contains the temp env file's path. The file is sourced and deleted at the start of the command, and a timer sweeps any leftovers.

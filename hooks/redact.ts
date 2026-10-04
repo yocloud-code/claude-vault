@@ -40,3 +40,12 @@ export const redactDeep = <T>(value: T): T => {
   }
   return value
 }
+
+// Detection over every string of a value, as `redactDeep` replaces. Checking `JSON.stringify`
+// instead misses secrets holding `"`, `\` or newlines, whose JSON form differs from the raw text.
+export const hasSecretsDeep = (value: unknown): boolean => {
+  if (typeof value === 'string') return hasSecrets(value)
+  if (Array.isArray(value)) return value.some(hasSecretsDeep)
+  if (value && typeof value === 'object') return Object.values(value).some(hasSecretsDeep)
+  return false
+}

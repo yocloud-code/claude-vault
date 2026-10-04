@@ -1,4 +1,4 @@
-import type { VaultForm, VaultGrant, VaultImportPreview, VaultProfile, VaultView } from '../types'
+import type { VaultForm, VaultGrant, VaultImportPreview, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
 import { TEMPLATES, envToText, exampleFor, namedVars, parseEnv, prefixOf, templateOf, variantOf } from './templates'
 import type { FieldKey, SecretDef } from './templates'
 
@@ -19,6 +19,10 @@ export type PaneState = {
   confirmDelete: string
   notice: string
   audit: string[]
+  probes: Record<string, VaultProbe>
+  probing: string
+  usage: Record<string, VaultUsage>
+  surface?: string
   now: number
 }
 
@@ -45,6 +49,8 @@ export type Actions = {
   confirmImport: () => void
   cancelImport: () => void
   close: () => void
+  probe: (name: string) => void
+  copy: (text: string, surface?: any) => void
 }
 
 const TYPE_ICON: Record<string, string> = Object.fromEntries(Object.entries(TEMPLATES).map(([k, t]) => [k, t.icon]))
@@ -63,6 +69,14 @@ const secretState = (name: string, p: VaultProfile, stored: Record<string, boole
 const remaining = (ms: number) => {
   const m = Math.max(0, Math.round(ms / 60000))
   return m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? (m % 60) + 'm' : ''}` : `${m}m`
+}
+
+const ago = (now: number, at: number) => {
+  const m = Math.max(0, Math.round((now - at) / 60000))
+  if (m < 1) return '刚刚'
+  if (m < 60) return `${m} 分钟前`
+  const h = Math.round(m / 60)
+  return h < 48 ? `${h} 小时前` : `${Math.round(h / 24)} 天前`
 }
 
 const noticeTone = (n: string) =>
@@ -158,6 +172,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
     const named = Object.entries(namedVars(displayName, { type: f.type, variant: v.key, secrets: secretNames, host: f.host, port: f.port, user: f.user, database: f.database }, true))
     const client = Object.entries(custom ? parseEnv(f.env) : v.env)
     const example = exampleFor(v.example, displayName)
+    const usage = `vault_exec(profile: "${displayName}", command: ${JSON.stringify(example)})`
     const VarRow = ({ k, tpl }: { k: string; tpl: string }) => (
       <Box gap={1}>
         <Box width={24} flexShrink={0}><Text color="cyan">{k}</Text></Box>
@@ -254,7 +269,18 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         </Card>
 
         <Card k="c-ex" title="Claude 的用法">
-          <Code source={`vault_exec(profile: "${displayName}", command: ${JSON.stringify(example)})`} language="text" />
+          <Code source={usage} language="text" />
+          <Box gap={1} marginTop={1} flexWrap="wrap">
+            <Button key="f-copy" label="复制用法" onPress={() => a.copy(usage, s.surface)} />
+            {editing && v.probe
+              ? <Button key="f-probe" label={s.probing === editing ? '测试中…' : '测试连接'} onPress={() => s.probing !== editing && a.probe(editing)} />
+              : null}
+            {editing && s.probes[editing]
+              ? <Text color={s.probes[editing].ok ? 'green' : 'red'} wrap="truncate-end">
+                  {s.probes[editing].ok ? `✔ 连接正常 · ${s.probes[editing].ms}ms` : `✖ ${s.probes[editing].message}`}
+                </Text>
+              : null}
+          </Box>
           <Text dimColor>或在 Bash 中直接引用专属变量；需要客户端变量时在首行写 #vault:{displayName}</Text>
         </Card>
 
@@ -273,6 +299,9 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
               ? `保存后写入本项目白名单，本项目的会话会自动获得${f.mode === 'write' ? '读写' : '只读'}授权`
               : '不写入白名单；需要时可在列表里临时授权本会话'}
           </Text>
+          {f.type === 'ssh' && f.allow && f.mode === 'read'
+            ? <Text color="yellow">⚠ 只读模式不会拦截 SSH 上执行的命令。只想让 Claude 查看时，请在服务器上为它使用一个权限受限的账号。</Text>
+            : null}
         </Card>
 
         <Toolbar>
@@ -341,6 +370,12 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
                 onSelect={(v: string) => a.importAction(it.name, v)} />
             </Box>
           ))}
+          {p.items.filter(it => it.clientVars.length || it.problems.length).map(it => (
+            <Box key={`i-vars-${it.name}`} flexDirection="column" marginTop={1}>
+              <Text dimColor wrap="truncate-end">{`${it.name} 的客户端变量：${it.clientVars.join(' ') || '（无）'}`}</Text>
+              {it.problems.map((why, i) => <Text key={`i-pb-${it.name}-${i}`} color="red">{`✖ ${why}，导入时会跳过`}</Text>)}
+            </Box>
+          ))}
           <Text dimColor>导入不会授权任何会话，需要时到编辑页的「本项目授权」里开启。</Text>
         </Card>
         <Toolbar>
@@ -406,6 +441,10 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
           const g = s.grants[n] && s.grants[n].expiresAt > s.now ? s.grants[n] : undefined
           const sec = secretState(n, p, s.stored)
           const sel = s.selected === n
+          const probe = s.probes[n]
+          const use = s.usage[n]
+          const canProbe = !!variantOf(p.type, p.variant).probe
+          const missingSecret = sec.color === 'red' || sec.color === 'yellow'
           const grantBadge = g
             ? { text: `已授权 ${g.mode} · ${remaining(g.expiresAt - s.now)}`, color: 'green' }
             : s.allow[n] ? { text: '待信任', color: 'yellow' } : { text: '未授权', color: 'gray' }
@@ -418,6 +457,12 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
               </Box>
               <Text dimColor wrap="truncate-end">{target(p) || '—'}</Text>
               {p.description ? <Text wrap="truncate-end">{p.description}</Text> : null}
+              {probe
+                ? <Text color={probe.ok ? 'green' : 'red'} wrap="truncate-end">
+                    {probe.ok ? `✔ 连接正常 · ${probe.ms}ms · ${ago(s.now, probe.at)}` : `✖ ${probe.message}`}
+                  </Text>
+                : null}
+              <Text dimColor>{use ? `最近使用 ${ago(s.now, use.last)} · 共 ${use.count} 次` : '尚未被 Claude 使用'}</Text>
             </Box>
           )
           const side = (
@@ -427,10 +472,15 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
                 <Badge text={grantBadge.text} color={grantBadge.color} />
               </Box>
               <Box gap={1}>
+                {canProbe && !missingSecret
+                  ? <Button key={`pr-${n}`} label={s.probing === n ? '测试中…' : '测试连接'} onPress={() => s.probing !== n && a.probe(n)} />
+                  : null}
                 <Button key={`ed-${n}`} label="编辑" onPress={() => a.editProfile(n)} />
                 {g
                   ? <Button key={`rv-${n}`} label="撤销" onPress={() => a.revoke(n)} />
-                  : <Button key={`gr-${n}`} label="授权" variant="primary" onPress={() => a.grant(n)} />}
+                  : missingSecret
+                    ? <Button key={`gr-${n}`} label="先设置密文" variant="primary" onPress={() => a.editProfile(n)} />
+                    : <Button key={`gr-${n}`} label="授权" variant="primary" onPress={() => a.grant(n)} />}
               </Box>
             </Box>
           )

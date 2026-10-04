@@ -13,7 +13,11 @@ export type SecretDef = { name: string; label: string; file?: boolean; hint?: st
  * standard variables (PGPASSWORD, KUBECONFIG, ...), injected only when the profile is chosen
  * explicitly; the per-profile `<NAME>_*` variables are derived from fields and secrets.
  */
-export type Variant = { key: string; label: string; secrets: SecretDef[]; env: Record<string, string>; example: string; hint?: string }
+export type Variant = {
+  key: string; label: string; secrets: SecretDef[]; env: Record<string, string>; example: string; hint?: string
+  /** A read-only command that succeeds (exit 0) when the connection works; `${P}` as in `example`. */
+  probe?: string
+}
 
 export type Template = { label: string; icon: string; summary: string; fields: FieldDef[]; port?: number; variants: Variant[] }
 
@@ -32,6 +36,7 @@ export const TEMPLATES: Record<string, Template> = {
       secrets: [{ name: 'password', label: '密码' }],
       env: { PGHOST: '{host}', PGPORT: '{port}', PGUSER: '{user}', PGDATABASE: '{database}', PGPASSWORD: '{secret:password}' },
       example: `psql -c 'select now()'`,
+      probe: `psql -X -A -t -c 'select 1'`,
     }),
   },
   mysql: {
@@ -46,6 +51,7 @@ export const TEMPLATES: Record<string, Template> = {
       secrets: [{ name: 'password', label: '密码' }],
       env: { MYSQL_HOST: '{host}', MYSQL_TCP_PORT: '{port}', MYSQL_PWD: '{secret:password}' },
       example: `mysql -u "\${P}_USER" "\${P}_DATABASE" -e 'select 1'`,
+      probe: `mysql -u "\${P}_USER" -e 'select 1'`,
     }),
   },
   redis: {
@@ -60,6 +66,7 @@ export const TEMPLATES: Record<string, Template> = {
       secrets: [{ name: 'password', label: '密码' }],
       env: { REDISCLI_AUTH: '{secret:password}' },
       example: `redis-cli -h "\${P}_HOST" -p "\${P}_PORT" ping`,
+      probe: `redis-cli -h "\${P}_HOST" -p "\${P}_PORT" ping | grep -q PONG`,
     }),
   },
   mongo: {
@@ -72,6 +79,7 @@ export const TEMPLATES: Record<string, Template> = {
       secrets: [{ name: 'uri', label: '连接串', hint: 'mongodb+srv://user:pass@host/db' }],
       env: { MONGODB_URI: '{secret:uri}' },
       example: `mongosh "\${P}_URI" --eval 'db.runCommand({ ping: 1 })'`,
+      probe: `mongosh "\${P}_URI" --quiet --eval 'db.runCommand({ ping: 1 }).ok'`,
     }),
   },
   ssh: {
@@ -87,12 +95,14 @@ export const TEMPLATES: Record<string, Template> = {
         secrets: [{ name: 'key', label: '私钥', file: true, hint: '用「从文件读取」选择私钥文件；命令执行时写入 0600 临时文件，结束即删除' }],
         env: { GIT_SSH_COMMAND: 'ssh -i {secretfile:key} -o IdentitiesOnly=yes -p {port}' },
         example: `ssh -i "\${P}_KEY_FILE" -o IdentitiesOnly=yes -p "\${P}_PORT" "\${P}_USER@\${P}_HOST" uptime`,
+        probe: `ssh -i "\${P}_KEY_FILE" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -p "\${P}_PORT" "\${P}_USER@\${P}_HOST" true`,
       },
       {
         key: 'password', label: '密码',
         secrets: [{ name: 'password', label: '密码' }],
         env: { SSHPASS: '{secret:password}', SSH_ASKPASS: '{askpass}', SSH_ASKPASS_REQUIRE: 'force' },
         example: `ssh -o StrictHostKeyChecking=accept-new -p "\${P}_PORT" "\${P}_USER@\${P}_HOST" uptime`,
+        probe: `ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -p "\${P}_PORT" "\${P}_USER@\${P}_HOST" true`,
         hint: '通过 SSH_ASKPASS 自动应答密码（需要 OpenSSH 8.4+），不需要安装 sshpass；只在 vault_exec 或 #vault: 指定时生效',
       },
     ],
@@ -107,6 +117,7 @@ export const TEMPLATES: Record<string, Template> = {
       secrets: [{ name: 'kubeconfig', label: 'kubeconfig', file: true, hint: '用「从文件读取」选择 kubeconfig 文件' }],
       env: { KUBECONFIG: '{secretfile:kubeconfig}' },
       example: `kubectl -n "\${\${P}_NAMESPACE:-default}" get pods`,
+      probe: `kubectl get --raw /version --request-timeout=8s`,
     }),
   },
   'http-token': {
@@ -118,6 +129,7 @@ export const TEMPLATES: Record<string, Template> = {
       secrets: [{ name: 'token', label: 'Token' }],
       env: {},
       example: `curl -H "Authorization: Bearer \${P}_TOKEN" "\${P}_URL/health"`,
+      probe: `curl -fsS -o /dev/null --max-time 8 -H "Authorization: Bearer \${P}_TOKEN" "\${P}_URL"`,
     }),
   },
   custom: {
@@ -192,3 +204,27 @@ export const isDefaultMapping = (p: Pick<VaultProfile, 'type' | 'variant' | 'sec
 /** Required fields of the type missing in the form, by label. */
 export const missingFields = (type: string, values: Record<FieldKey, string>) =>
   templateOf(type).fields.filter(f => f.required && !values[f.key].trim()).map(f => f.label)
+
+// Variables a client mapping may never set: each makes the shell, the dynamic loader or an
+// interpreter run code of the setter's choosing (BASH_ENV runs a file on every `bash -c`).
+const DANGEROUS = /^(BASH_ENV|ENV|BASH_FUNC_.*|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS[0-4]|IFS|CDPATH|PATH|HOME|SHELL|TMPDIR|ZDOTDIR|LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_.*|NODE_OPTIONS|NODE_PATH|PYTHONSTARTUP|PYTHONPATH|PYTHONHOME|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS)$/
+
+// Variables that name a program to run: allowed only with a value one of the templates itself uses.
+const PROGRAM_VARS = new Set(['SSH_ASKPASS', 'GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GIT_EXTERNAL_DIFF', 'LESSOPEN', 'LESSCLOSE', 'SUDO_ASKPASS'])
+
+const templateValues = (key: string) =>
+  new Set(Object.values(TEMPLATES).flatMap(t => t.variants.map(v => v.env[key]).filter((x): x is string => x !== undefined)))
+
+/** Why a client variable may not be set this way, or undefined when it may. */
+export const envProblem = (key: string, tpl: string): string | undefined => {
+  if (DANGEROUS.test(key)) return `${key} 会让 shell 或解释器执行任意代码，不允许设置`
+  if (PROGRAM_VARS.has(key) && !templateValues(key).has(tpl)) return `${key} 会指定要执行的程序，只能使用模板自带的值`
+  return undefined
+}
+
+/** Every problem of a client mapping, as `KEY: reason` lines. */
+export const envProblems = (env: Record<string, string>) =>
+  Object.entries(env).flatMap(([k, v]) => {
+    const why = envProblem(k, v)
+    return why ? [why] : []
+  })

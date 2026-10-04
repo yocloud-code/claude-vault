@@ -40,7 +40,13 @@ export type VaultImportItem = {
   status: 'new' | 'conflict' | 'same'
   action: 'add' | 'overwrite' | 'skip' | 'rename'
   secretCount: number
+  clientVars: string[]
+  problems: string[]
 }
+
+export type VaultProbe = { ok: boolean; at: number; ms: number; message: string }
+
+export type VaultUsage = { count: number; last: number }
 
 export type VaultImportPreview = {
   file: string
@@ -65,6 +71,9 @@ declare module 'claude-code' {
       confirmDelete: string
       notice: string
       audit: string[]
+      probes: Record<string, VaultProbe>
+      probing: string
+      usage: Record<string, VaultUsage>
     }
   }
 }

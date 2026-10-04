@@ -48,6 +48,10 @@ const base = (view: PaneState['view'], cols: number, extra: Partial<PaneState> =
   trust: 'untrusted', view, selected: 'prod-db', form: null, exportSel: ['prod-db'], exportSecrets: true,
   importPreview: null, confirmDelete: '', notice: '✔ 已授权 prod-db（本会话）',
   audit: ['10-04 12:01:02 grant prod-db', '10-04 12:03:10 exec prod-db psql -c "select 1"', '10-04 12:05:44 export prod-db'],
+  probes: { 'prod-db': { ok: true, at: now - 120000, ms: 320, message: '' }, bastion: { ok: false, at: now, ms: 0, message: 'Permission denied (password).' } },
+  probing: 'k8s-prod',
+  usage: { 'prod-db': { count: 12, last: now - 180000 } },
+  surface: 'desktop',
   now, ...extra,
 })
 
@@ -61,8 +65,8 @@ const cases: [string, PaneState][] = [
   ['edit custom', base('edit', 100, { form: { original: 'x', name: 'x', description: '', variant: 'default', type: 'custom', host: '', port: '', user: '', database: '', secrets: 'token', env: 'API_TOKEN={secret:token}', allow: false, mode: 'read', advanced: true } })],
   ['export', base('export', 100)],
   ['import', base('import', 100, { importPreview: { file: '/Users/x/backup-20261004.cvault', encrypted: true, items: [
-    { name: 'prod-db', status: 'conflict', action: 'skip', secretCount: 1 },
-    { name: 'redis-cache', status: 'new', action: 'add', secretCount: 1 }] } })],
+    { name: 'prod-db', status: 'conflict', action: 'skip', secretCount: 1, clientVars: ['PGPASSWORD'], problems: [] },
+    { name: 'redis-cache', status: 'new', action: 'add', secretCount: 1, clientVars: ['BASH_ENV'], problems: ['BASH_ENV 会让 shell 或解释器执行任意代码，不允许设置'] }] } })],
   ['audit', base('audit', 100)],
 ]
 
