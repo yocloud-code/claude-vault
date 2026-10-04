@@ -1,0 +1,6 @@
+{
+  "name": "vault",
+  "version": "0.1.0",
+  "description": "Credential vault: macOS Keychain-backed secrets, project allowlist grants, injected env, redacted output, UI with import/export",
+  "types": "./types/index.d.ts"
+}
