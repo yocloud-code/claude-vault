@@ -57,7 +57,6 @@ const base = (view: PaneState['view'], cols: number, extra: Partial<PaneState> =
   probing: 'k8s-prod',
   usage: { 'prod-db': { count: 12, last: now - 180000 } },
   surface: 'desktop',
-  cleanup: null,
   now, ...extra,
 })
 
@@ -76,12 +75,6 @@ const cases: [string, PaneState][] = [
   ['audit', base('audit', 100)],
   ['grants', base('grants', 100)],
   ['grants empty', base('grants', 56, { allGrants: {} })],
-  ['cleanup', base('cleanup', 100, { cleanup: [
-    { key: 'grants', label: '撤销本会话的全部授权', detail: 'prod-db', count: 1, on: true },
-    { key: 'orphans', label: '删除孤立的钥匙串条目', detail: 'old-db.password', count: 1, on: true },
-    { key: 'audit', label: '清空审计日志', detail: '120 条记录，清空后无法恢复', count: 120, on: false },
-  ] })],
-  ['cleanup checking', base('cleanup', 56)],
 ]
 
 test('every view draws', () => {

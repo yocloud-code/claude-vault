@@ -126,7 +126,7 @@ psql -c 'select 1'
 
 ### 一键清理
 
-工具栏「🧹 一键清理」（快捷键 `c`）会先检查一遍，列出可以清理的内容，勾选后执行：失效的授权（profile 已删除或目录已不存在）、孤立的钥匙串条目、残留的临时文件、测试连接结果；「撤销当前目录的全部授权」和「清空审计日志」默认不勾选。不会删除任何 profile 或正在使用的密文。
+工具栏「🧹 一键清理」（快捷键 `c`）会**清空 Vault 的全部数据**：所有凭证、钥匙串里所有 `claude-vault` 条目（包括残留的旧密文）、所有目录的授权、临时文件、测试结果和审计日志。执行前会弹出系统确认框，列出将删除的数量，默认按钮是「取消」。无法撤销，需要保留的话先「导出」备份，之后可以导入恢复。钥匙串里其他应用的条目不受影响。
 
 ### 环境变量的生命周期与冲突
 
@@ -340,7 +340,7 @@ psql -c 'select 1'
 
 ### One-click cleanup
 
-"🧹 一键清理" (hotkey `c`) checks first, lists what can be cleaned, and runs the items you tick: stale grants (deleted profile or missing directory), orphaned Keychain items, leftover temp files, connection-test results. "Revoke all grants of the current directory" and "clear the audit log" start unticked. No profile and no secret in use is ever removed.
+"🧹 一键清理" (hotkey `c`) **wipes all vault data**: every profile, every Keychain item under the `claude-vault` service (leftovers included), grants on every directory, temp files, connection-test results and the audit log. A native confirmation lists what will go, with "Cancel" as the default button. It cannot be undone; export first to keep a backup you can import later. Other apps' Keychain items are untouched.
 
 ### Variable lifecycle and conflicts
 

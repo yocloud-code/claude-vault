@@ -20,7 +20,7 @@ export type VaultGrant = { mode: VaultMode; dir: string; at: number }
 /** Grants by directory (real path), then by profile name. */
 export type VaultDirGrants = Record<string, Record<string, { mode: VaultMode; at: number }>>
 
-export type VaultView = 'list' | 'edit' | 'export' | 'import' | 'audit' | 'cleanup' | 'grants'
+export type VaultView = 'list' | 'edit' | 'export' | 'import' | 'audit' | 'grants'
 
 export type VaultForm = {
   original?: string
@@ -50,8 +50,6 @@ export type VaultProbe = { ok: boolean; at: number; ms: number; message: string 
 
 export type VaultUsage = { count: number; last: number }
 
-export type VaultCleanupItem = { key: string; label: string; detail: string; count: number; on: boolean }
-
 export type VaultImportPreview = {
   file: string
   encrypted: boolean
@@ -77,7 +75,6 @@ declare module 'claude-code' {
       probes: Record<string, VaultProbe>
       probing: string
       usage: Record<string, VaultUsage>
-      cleanup: VaultCleanupItem[] | null
     }
   }
 }

@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { VaultCleanupItem, VaultDirGrants, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
+import type { VaultDirGrants, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
 import { hasSecretsDeep, redact, redactDeep, remember } from './redact'
 import { dumpReason, isAllowFile, isVaultPath, peekReason, writeReason } from './guard'
 import { HEADER, ITER, envelope, isSealed, parsePlain, sealedBody, unwrap } from './transfer'
@@ -71,10 +71,10 @@ const askHidden = ($: EngineInterface, prompt: string) =>
     'return text returned of (display dialog (item 1 of argv) default answer "" with hidden answer with title "Claude Vault" with icon caution)',
   ], [prompt])
 
-const confirm = async ($: EngineInterface, prompt: string) =>
+const confirmDanger = async ($: EngineInterface, prompt: string, action: string) =>
   (await osa($, [
-    'return button returned of (display dialog (item 1 of argv) buttons {"取消", "确认"} default button "确认" with title "Claude Vault")',
-  ], [prompt])) === '确认'
+    'return button returned of (display dialog (item 1 of argv) buttons {"取消", (item 2 of argv)} default button "取消" cancel button "取消" with title "Claude Vault" with icon stop)',
+  ], [prompt, action])) === action
 
 const chooseFile = ($: EngineInterface, prompt: string) =>
   osa($, ['return POSIX path of (choose file with prompt (item 1 of argv))'], [prompt])
@@ -341,111 +341,50 @@ async function vaultAccounts($: EngineInterface): Promise<string[]> {
   return [...new Set(out)]
 }
 
-// Accounts that belong to no current profile secret (deleted profiles, switched SSH auth, renames).
-// Never guess: an unreadable profiles.json would make every secret look orphaned, so it yields
-// `unsafe` and nothing is offered for deletion.
-async function orphanAccounts($: EngineInterface): Promise<{ orphans: string[]; unsafe?: string; noProfiles?: boolean }> {
-  const { profiles: file } = await paths($)
-  let profiles: Record<string, VaultProfile> = {}
-  if (await $.fs.exists(file)) {
-    try {
-      profiles = JSON.parse(await $.fs.read(file)) as Record<string, VaultProfile>
-    } catch {
-      return { orphans: [], unsafe: 'profiles.json 无法读取，为安全起见跳过' }
-    }
-  }
-  const wanted = new Set(Object.entries(profiles).flatMap(([n, p]) => (p.secrets ?? []).map(f => `${n}.${f}`)))
-  const orphans = (await vaultAccounts($)).filter(a => !wanted.has(a))
-  return { orphans, noProfiles: Object.keys(profiles).length === 0 }
-}
-
 async function strayRunFiles($: EngineInterface) {
   const { run } = await paths($)
   const entries = await $.fs.list(run).catch(() => [])
   return entries.filter(x => x.kind === 'file').map(x => `${run}/${x.name}`).filter(f => !liveFiles.has(f))
 }
 
-// Grants naming a deleted profile, or a directory that no longer exists.
-async function staleGrants($: EngineInterface, all: VaultDirGrants) {
+async function deleteProfile($: EngineInterface, n: string) {
+  const all = await loadProfiles($)
+  for (const f of all[n]?.secrets ?? []) await deleteSecret($, account(n, f))
+  delete all[n]
+  await saveProfiles($, all)
+  await editAllGrants($, entries => { delete entries[n] })
+  await audit($, { event: 'delete-profile', profile: n })
+}
+
+// What a full wipe would remove, for the confirmation.
+async function wipeSummary($: EngineInterface) {
   const profiles = await loadProfiles($)
-  const out: { dir: string; name: string }[] = []
-  for (const [dir, entries] of Object.entries(all)) {
-    const exists = await $.fs.exists(dir).catch(() => false)
-    for (const name of Object.keys(entries)) if (!exists || !profiles[name]) out.push({ dir, name })
-  }
-  return out
-}
-
-async function cleanupPlan($: EngineInterface): Promise<VaultCleanupItem[]> {
+  // the dump finds leftovers too; the profiles' own accounts are added in case it found nothing
+  const own = Object.entries(profiles).flatMap(([n, p]) => (p.secrets ?? []).map(f => `${n}.${f}`)).filter(a => SAFE.test(a))
+  const accounts = [...new Set([...(await vaultAccounts($)), ...own])]
   const all = await loadGrantFile($)
-  const here = await currentDir($)
-  const grants = Object.keys(all[here] ?? {})
-  const stale = await staleGrants($, all)
+  const grants = Object.values(all).reduce((n, e) => n + Object.keys(e).length, 0)
   const stray = await strayRunFiles($)
-  const orph = await orphanAccounts($)
-  const orphans = orph.orphans
-  const probes = Object.keys((await read($, probesA)) as Record<string, VaultProbe>)
-  const { audit: file } = await paths($)
-  let lines = 0
-  try { lines = (await $.fs.read(file)).split('\n').filter(Boolean).length } catch {}
-  return [
-    { key: 'grants', label: '撤销当前目录的全部授权', detail: grants.join('、') || '无（上级目录的授权请在「授权管理」里撤销）', count: grants.length, on: false },
-    {
-      key: 'orphans', label: '删除孤立的钥匙串条目',
-      detail: orph.unsafe ?? (orph.noProfiles && orphans.length
-        ? `⚠ 当前没有任何 profile，这些都会被删除：${orphans.join('、')}`
-        : orphans.join('、') || '无（只会删除不属于任何现有 profile 的旧密文）'),
-      count: orphans.length,
-      // with no profile at all, deleting everything is a decision the person makes explicitly
-      on: !orph.noProfiles,
-    },
-    { key: 'stale-grants', label: '移除失效的授权', detail: stale.map(x => `${x.name} @ ${x.dir.replace(/^\/Users\/[^/]+/, '~')}`).join('、') || '无（profile 已删除或目录已不存在）', count: stale.length, on: true },
-    { key: 'stray', label: '删除残留的临时文件', detail: stray.length ? `${stray.length} 个（私钥、kubeconfig、env 文件）` : '无', count: stray.length, on: true },
-    { key: 'probes', label: '清除测试连接结果', detail: probes.join('、') || '无', count: probes.length, on: true },
-    { key: 'audit', label: '清空审计日志', detail: `${lines} 条记录，清空后无法恢复`, count: lines, on: false },
-  ]
+  return { profiles: Object.keys(profiles), accounts, dirs: Object.keys(all).length, grants, stray }
 }
 
-async function runCleanupPlan($: EngineInterface, keys: string[]) {
-  const done: string[] = []
-  for (const key of keys) {
-    if (key === 'grants') {
-      const here = await currentDir($)
-      const all = await loadGrantFile($)
-      const n = Object.keys(all[here] ?? {}).length
-      delete all[here]
-      await saveGrantFile($, all)
-      await refreshGrants($)
-      done.push(`撤销当前目录 ${n} 个授权`)
-    } else if (key === 'orphans') {
-      const { orphans, unsafe } = await orphanAccounts($)
-      if (unsafe) { done.push(unsafe); continue }
-      for (const a of orphans) await deleteSecret($, a)
-      done.push(`删除 ${orphans.length} 个孤立钥匙串条目`)
-    } else if (key === 'stale-grants') {
-      const all = await loadGrantFile($)
-      const stale = await staleGrants($, all)
-      for (const x of stale) delete all[x.dir]?.[x.name]
-      await saveGrantFile($, all)
-      await refreshGrants($)
-      done.push(`移除 ${stale.length} 个失效授权`)
-    } else if (key === 'stray') {
-      const stray = await strayRunFiles($)
-      await removeFiles($, stray)
-      done.push(`删除 ${stray.length} 个临时文件`)
-    } else if (key === 'probes') {
-      await update($, probesA, () => ({}))
-      done.push('清除测试结果')
-    } else if (key === 'audit') {
-      const { audit: file } = await paths($)
-      await writePrivate($, file, '')
-      await update($, usageA, () => ({}))
-      done.push('清空审计日志')
-    }
-  }
-  await audit($, { event: 'cleanup', items: keys })
+// Removes everything the vault keeps: every Keychain item under its service (profile secrets and
+// leftovers alike), profiles, grants on every directory, temp files, probe results and the audit log.
+async function wipeAll($: EngineInterface) {
+  const sum = await wipeSummary($)
+  for (const a of sum.accounts) await deleteSecret($, a)
+  await saveProfiles($, {})
+  await saveGrantFile($, {})
+  await removeFiles($, sum.stray)
+  const { audit: file } = await paths($)
+  await writePrivate($, file, '')
+  await update($, probesA, () => ({}))
+  await update($, usageA, () => ({}))
+  await update($, selectedA, () => '')
+  await audit($, { event: 'wipe-all', profiles: sum.profiles.length, keychain: sum.accounts.length, grants: sum.grants })
   await refreshProfiles($)
-  return done
+  await refreshGrants($)
+  return sum
 }
 
 // ---------- export encryption (system openssl; the passphrase rides in the child env, never argv) ----------
@@ -488,7 +427,6 @@ const auditA = atom({ plugin: 'vault', key: 'audit' } as const, [])
 const probesA = atom({ plugin: 'vault', key: 'probes' } as const, {})
 const probingA = atom({ plugin: 'vault', key: 'probing' } as const, '')
 const usageA = atom({ plugin: 'vault', key: 'usage' } as const, {})
-const cleanupA = atom({ plugin: 'vault', key: 'cleanup' } as const, null)
 
 let cwd = ''
 // decrypted import bundle: module memory only, never $.state
@@ -705,21 +643,21 @@ function actions($: EngineInterface): Actions {
     await setGrant($, n, 'off', dir)
     await notice($, `已撤销 ${n} @ ${dir.replace(/^\/Users\/[^/]+/, '~')}`)
   },
-  openCleanup: async () => {
-    // null while the plan is computed: the view says it is checking
-    await update($, cleanupA, () => null)
-    await update($, viewA, () => 'cleanup')
-    const items = await cleanupPlan($)
-    await update($, cleanupA, () => items)
-  },
-  toggleCleanup: key => void update($, cleanupA, (items: VaultCleanupItem[] | null) =>
-    items ? items.map(i => (i.key === key ? { ...i, on: !i.on } : i)) : items),
-  runCleanup: async () => {
-    const items = ((await read($, cleanupA)) as VaultCleanupItem[] | null) ?? []
-    const done = await runCleanupPlan($, items.filter(i => i.on && i.count > 0).map(i => i.key))
-    await update($, cleanupA, () => null)
+  wipeAll: async () => {
+    const sum = await wipeSummary($)
+    if (!sum.profiles.length && !sum.accounts.length && !sum.grants && !sum.stray.length) return notice($, '没有需要清理的内容')
+    const lines = [
+      `凭证 ${sum.profiles.length} 个${sum.profiles.length ? `：${sum.profiles.join('、')}` : ''}`,
+      `钥匙串里的 vault 密文 ${sum.accounts.length} 条`,
+      `目录授权 ${sum.grants} 条（${sum.dirs} 个目录）`,
+      '以及临时文件、测试结果和审计日志',
+    ]
+    const ok = await confirmDanger($,
+      `将永久删除 Vault 的全部数据：\n\n${lines.join('\n')}\n\n无法撤销。需要恢复的话，请先「导出」备份。`, '全部删除')
+    if (!ok) return notice($, '已取消')
+    const done = await wipeAll($)
     await update($, viewA, () => 'list')
-    await notice($, done.length ? `清理完成：${done.join('；')}` : '没有需要清理的内容')
+    await notice($, `已全部清理：删除 ${done.profiles.length} 个凭证、${done.accounts.length} 条钥匙串密文、${done.grants} 条授权`)
   },
   newProfile: async () => { await update($, formA, () => blankForm()); await update($, confirmDeleteA, () => ''); await update($, viewA, () => 'edit') },
   editProfile: async n => {
@@ -831,12 +769,7 @@ function actions($: EngineInterface): Actions {
   },
   askDelete: n => void update($, confirmDeleteA, () => n),
   doDelete: async n => {
-    const all = await loadProfiles($)
-    for (const f of all[n]?.secrets ?? []) await deleteSecret($, account(n, f))
-    delete all[n]
-    await saveProfiles($, all)
-    await editAllGrants($, entries => { delete entries[n] })
-    await audit($, { event: 'delete-profile', profile: n })
+    await deleteProfile($, n)
     await refreshProfiles($)
     await update($, viewA, () => 'list')
     await notice($, `已删除 ${n}`)
@@ -1120,7 +1053,6 @@ export const register: Register = on => {
       probes: await read($, probesA),
       probing: await read($, probingA),
       usage: await read($, usageA),
-      cleanup: await read($, cleanupA),
       surface: e.surface,
       now: now(),
     } as any, actions($))

@@ -1,4 +1,4 @@
-import type { VaultCleanupItem, VaultDirGrants, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
+import type { VaultDirGrants, VaultForm, VaultGrant, VaultImportPreview, VaultMode, VaultProbe, VaultProfile, VaultUsage, VaultView } from '../types'
 import { TEMPLATES, envToText, exampleFor, namedVars, parseEnv, prefixOf, templateOf, variantOf } from './templates'
 import type { FieldKey, SecretDef } from './templates'
 
@@ -21,7 +21,6 @@ export type PaneState = {
   probes: Record<string, VaultProbe>
   probing: string
   usage: Record<string, VaultUsage>
-  cleanup: VaultCleanupItem[] | null
   surface?: string
   now: number
 }
@@ -31,9 +30,7 @@ export type Actions = {
   select: (name: string) => void
   setGrant: (name: string, mode: VaultMode | 'off') => void
   revokeAt: (dir: string, name: string) => void
-  openCleanup: () => void
-  toggleCleanup: (key: string) => void
-  runCleanup: () => void
+  wipeAll: () => void
   newProfile: () => void
   editProfile: (name: string) => void
   formSet: (patch: Partial<VaultForm>) => void
@@ -112,7 +109,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
   const total = Object.keys(s.profiles).length
   const crumbs: Record<VaultView, string> = {
     list: '凭证', edit: s.form?.original ? `编辑 ${s.form.original}` : '新建凭证',
-    export: '导出', import: '导入', audit: '审计日志', cleanup: '一键清理', grants: '授权管理',
+    export: '导出', import: '导入', audit: '审计日志', grants: '授权管理',
   }
   const header = (
     <Box key="hdr" flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
@@ -396,36 +393,6 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
     )
   }
 
-  // ---------- cleanup ----------
-  if (s.view === 'cleanup') {
-    const items = s.cleanup
-    const chosen = (items ?? []).filter(i => i.on && i.count > 0)
-    return (
-      <Box flexDirection="column">
-        {header}
-        {notice}
-        <Card k="c-clean" title="选择要清理的内容">
-          {items === null ? <Text dimColor>正在检查钥匙串、临时文件和白名单…</Text> : null}
-          {(items ?? []).map(i => (
-            <Box key={`cl-${i.key}`} flexDirection="column" marginTop={1}>
-              <Box gap={1} alignItems="center">
-                <Button key={`clb-${i.key}`} plain label={`${i.on ? '☑' : '☐'}  ${i.label}`} onPress={() => a.toggleCleanup(i.key)} />
-                <Badge text={i.count ? `${i.count} 项` : '无需清理'} color={i.count ? (i.key === 'audit' ? 'yellow' : 'cyan') : 'gray'} />
-              </Box>
-              <Text dimColor wrap="truncate-end">{`   ${i.detail}`}</Text>
-            </Box>
-          ))}
-          <Text dimColor>不会删除任何 profile 或正在使用的密文；正在运行的命令的临时文件不会被删除。</Text>
-        </Card>
-        <Toolbar>
-          <Button key="cl-go" label={chosen.length ? `清理 ${chosen.length} 类` : '没有可清理的'} variant="primary"
-            onPress={() => chosen.length && a.runCleanup()} />
-          <Button key="cl-back" label="返回" hotkey="b" role="dismiss" onPress={() => a.go('list')} />
-        </Toolbar>
-      </Box>
-    )
-  }
-
   // ---------- audit ----------
   if (s.view === 'audit') {
     const tone = (ev: string) =>
@@ -552,7 +519,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         <Button key="export" label="导出" hotkey="x" onPress={() => a.go('export')} />
         <Button key="grants" label="授权管理" hotkey="g" onPress={() => a.go('grants')} />
         <Button key="audit" label="审计日志" hotkey="l" onPress={() => a.go('audit')} />
-        <Button key="cleanup" label="🧹 一键清理" hotkey="c" onPress={() => a.openCleanup()} />
+        <Button key="cleanup" label="🧹 一键清理" hotkey="c" onPress={() => a.wipeAll()} />
         <Button key="close" label="关闭" role="dismiss" onPress={() => a.close()} />
       </Toolbar>
     </Box>
