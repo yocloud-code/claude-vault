@@ -1041,6 +1041,9 @@ export const register: Register = on => {
     await warmRedaction($)
     await sweepRun($)
     $.clock.every(60_000, () => void sweepRun($))
+    // A reload leaves an open pane drawn by the previous module, whose buttons no longer answer
+    // (the desktop logs "ui_press not handled"): redraw it so its handlers are this module's.
+    if ((await $.ui.panes()).some(pane => pane.id === PANE)) $.ui.invalidate('ui.render')
     return next(e)
   })
 
