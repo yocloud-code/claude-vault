@@ -17,6 +17,8 @@ export type Variant = {
   key: string; label: string; secrets: SecretDef[]; env: Record<string, string>; example: string; hint?: string
   /** A read-only command that succeeds (exit 0) when the connection works; `${P}` as in `example`. */
   probe?: string
+  /** Per-profile variables computed when a command runs (`TOKEN: '{supabase_token}'` → `<PREFIX>_TOKEN`). */
+  derived?: Record<string, string>
 }
 
 export type Template = { label: string; icon: string; summary: string; fields: FieldDef[]; port?: number; variants: Variant[] }
@@ -120,6 +122,24 @@ export const TEMPLATES: Record<string, Template> = {
       probe: `kubectl get --raw /version --request-timeout=8s`,
     }),
   },
+  supabase: {
+    label: 'Supabase 账号', icon: '🟩', summary: '用账号密码登录 Supabase，注入访问令牌；密码和令牌都不会出现在对话里',
+    fields: [
+      { key: 'host', label: '项目地址', placeholder: 'https://xxxx.supabase.co', required: true, suffix: 'URL' },
+      { key: 'user', label: '登录邮箱', placeholder: 'ops3.accountant@example.test', required: true, suffix: 'EMAIL' },
+    ],
+    variants: one({
+      secrets: [
+        { name: 'password', label: '密码' },
+        { name: 'anon_key', label: 'anon key', hint: '项目的公开 anon key（Supabase 控制台 → Project Settings → API），登录接口需要它' },
+      ],
+      env: { SUPABASE_URL: '{host}', SUPABASE_ANON_KEY: '{secret:anon_key}', SUPABASE_ACCESS_TOKEN: '{supabase_token}' },
+      derived: { TOKEN: '{supabase_token}' },
+      example: `curl -s "\${P}_URL/rest/v1/<表名>?select=*&limit=5" -H "apikey: \${P}_ANON_KEY" -H "Authorization: Bearer \${P}_TOKEN"`,
+      probe: `curl -fsS --max-time 8 -o /dev/null "\${P}_URL/auth/v1/user" -H "apikey: \${P}_ANON_KEY" -H "Authorization: Bearer \${P}_TOKEN"`,
+      hint: '每次执行命令时由 Mod 用账号密码登录，令牌只在这一条命令里有效；同一条命令可以同时使用多个账号',
+    }),
+  },
   'http-token': {
     label: 'HTTP API Token', icon: '🔑', summary: 'API 地址和 Token，配合 curl 使用',
     fields: [
@@ -178,8 +198,12 @@ export const namedVars = (name: string, p: Pick<VaultProfile, 'type' | 'variant'
     const file = defs.find(d => d.name === s)?.file
     out[`${P}_${prefixOf(s)}${file ? '_FILE' : ''}`] = file ? `{secretfile:${s}}` : `{secret:${s}}`
   }
+  for (const [suffix, tpl] of Object.entries(variantOf(p.type, p.variant).derived ?? {})) out[`${P}_${suffix}`] = tpl
   return out
 }
+
+/** Templates whose value is secret: Keychain values and anything derived from them. */
+export const isSecretTemplate = (tpl: string) => /\{(secret|secretfile|supabase_token)\b/.test(tpl)
 
 export const envToText = (env: Record<string, string>) =>
   Object.entries(env).map(([k, v]) => `${k}=${v}`).join('; ')
@@ -228,3 +252,30 @@ export const envProblems = (env: Record<string, string>) =>
     const why = envProblem(k, v)
     return why ? [why] : []
   })
+
+/**
+ * What is wrong with a secret's content for its type, or undefined. Catches truncated pastes:
+ * a kubeconfig whose user has a certificate but no key, a private key without its end line.
+ */
+export const secretProblem = (type: string, field: string, value: string): string | undefined => {
+  const v = value.trim()
+  if (!v) return '内容为空'
+  if (type === 'kube' && field === 'kubeconfig') {
+    if (!/^\s*clusters\s*:/m.test(v) || !/^\s*users\s*:/m.test(v)) return 'kubeconfig 不完整：缺少 clusters 或 users 段'
+    if (/client-certificate-data\s*:/.test(v) && !/client-key-data\s*:/.test(v) && !/client-key\s*:/.test(v)) {
+      return 'kubeconfig 不完整：有 client-certificate-data 却没有 client-key-data（多半是粘贴被截断）'
+    }
+    const blob = /client-key-data\s*:\s*(\S*)/.exec(v)?.[1]
+    if (blob !== undefined && (blob.length < 100 || !/^[A-Za-z0-9+/=]+$/.test(blob))) return 'kubeconfig 不完整：client-key-data 内容被截断'
+    return undefined
+  }
+  if (type === 'ssh' && field === 'key') {
+    if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(v)) return '不是私钥文件：缺少 BEGIN PRIVATE KEY 行'
+    if (!/-----END [A-Z ]*PRIVATE KEY-----\s*$/.test(v)) return '私钥不完整：缺少 END PRIVATE KEY 行（多半是粘贴被截断）'
+    return undefined
+  }
+  if (type === 'supabase' && field === 'anon_key' && !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(v) && !/^sb_publishable_/.test(v)) {
+    return 'anon key 格式不对：应为 eyJ… 开头的 JWT 或 sb_publishable_ 开头的密钥'
+  }
+  return undefined
+}

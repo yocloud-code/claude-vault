@@ -44,7 +44,7 @@ claude --plugin-dir /path/to/claude-vault
 ### Claude 怎么用凭证
 
 - **`vault_exec` 工具**（Claude 默认会用）：指定凭证名和命令，`psql`、`kubectl`、`ssh` 等客户端不用加任何参数就能连上。
-- **在 Bash 里引用专属变量**：每个凭证都有以名称为前缀的变量，例如 `prod-db` 有 `$PROD_DB_HOST`、`$PROD_DB_PASSWORD`。
+- **在 Bash 里引用专属变量**：每个凭证都有以名称为前缀的变量，例如 `prod-db` 有 `$PROD_DB_HOST`、`$PROD_DB_PASSWORD`；Supabase 账号还有登录后得到的 `$<名称>_TOKEN`，多个角色可以在同一条命令里一起用。
 - **命令首行写 `#vault:prod-db`**：同时注入 `PGPASSWORD` 这类客户端标准变量。
 
 每个凭证有哪些变量，在编辑页的「环境变量」里能看到。
@@ -73,6 +73,9 @@ claude --plugin-dir /path/to/claude-vault
 
 **新会话里找不到 `/vault`？**
 确认 `~/.claude/settings.json` 里配置了 `CLAUDE_CODE_PLUGIN_DIRS`，然后新开一个会话。在桌面版的命令菜单里搜 `vault`，显示的是 `/vault:vault`。
+
+**提示 kubeconfig 或私钥"不完整"？**
+保存时内容被截断了，常见于把多行内容粘贴进输入框。在编辑页点「从文件读取」，选择原始文件重新导入。私钥、kubeconfig 这类文件只能从文件读取。
 
 **命令被拒绝"疑似写操作"？**
 当前授权是「只读」。需要写入时，在卡片上改成「读写」。
@@ -105,6 +108,7 @@ claude --plugin-dir /path/to/claude-vault
 | MongoDB | — | 连接串 | `MONGODB_URI` |
 | SSH | 主机、用户 | 私钥文件或密码 | `GIT_SSH_COMMAND`，密码登录无需 sshpass |
 | Kubernetes | — | kubeconfig 文件 | `KUBECONFIG` |
+| Supabase 账号 | 项目地址、登录邮箱 | 密码、anon key | 执行时自动登录，注入 `$<名称>_TOKEN`（访问令牌） |
 | HTTP API Token | Base URL | Token | — |
 | 自定义 | — | 自定义 | 在编辑页「高级」里自定义 |
 
@@ -158,7 +162,7 @@ From then on, just ask Claude, e.g. "check the orders table on prod-db".
 ### How Claude uses credentials
 
 - **The `vault_exec` tool** (Claude's default): name the credential and the command; clients like `psql`, `kubectl` and `ssh` connect without any flags.
-- **Profile variables in Bash**: every credential has variables prefixed with its name, e.g. `prod-db` gets `$PROD_DB_HOST` and `$PROD_DB_PASSWORD`.
+- **Profile variables in Bash**: every credential has variables prefixed with its name, e.g. `prod-db` gets `$PROD_DB_HOST` and `$PROD_DB_PASSWORD`; a Supabase account also gets `$<NAME>_TOKEN` from its login, and several roles can be used in one command.
 - **A first line `#vault:prod-db`**: also injects the client's standard variables such as `PGPASSWORD`.
 
 The edit page lists every variable a credential provides.
@@ -187,6 +191,9 @@ Grant it to the current directory in the `/vault` pane.
 
 **`/vault` is missing in a new session?**
 Check that `CLAUDE_CODE_PLUGIN_DIRS` is set in `~/.claude/settings.json`, then start a new session. In the desktop app's command menu, search for `vault`; it is listed as `/vault:vault`.
+
+**A kubeconfig or private key is reported as "incomplete"?**
+It was cut off when saved, usually by pasting multi-line text into a dialog. Use "从文件读取" (From file) on the edit page and pick the original file. Key and kubeconfig secrets can only be read from a file.
 
 **A command was refused as a "possible write"?**
 The grant is read-only. Switch it to "读写" (write) on the card.
@@ -219,6 +226,7 @@ Pane hotkeys: `n` new · `e` edit · `g` grants · `x` export · `i` import · `
 | MongoDB | — | connection URI | `MONGODB_URI` |
 | SSH | host, user | key file or password | `GIT_SSH_COMMAND`; password login needs no sshpass |
 | Kubernetes | — | kubeconfig file | `KUBECONFIG` |
+| Supabase account | project URL, email | password, anon key | logs in when a command runs and injects `$<NAME>_TOKEN` (access token) |
 | HTTP API token | base URL | token | — |
 | Custom | — | your own | define them under "Advanced" on the edit page |
 

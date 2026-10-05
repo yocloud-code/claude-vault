@@ -7,7 +7,7 @@ import { HEADER, ITER, envelope, isSealed, parsePlain, sealedBody, unwrap } from
 import type { Bundle } from './transfer'
 import { renderPane } from './ui'
 import { aliasKey, effectiveGrants, namedClash, selectProfiles, varsOf } from './select'
-import { envProblem, envProblems, envToText, exampleFor, isDefaultMapping, missingFields, namedVars, parseEnv, templateOf, variantOf } from './templates'
+import { envProblem, envProblems, envToText, exampleFor, isDefaultMapping, missingFields, namedVars, parseEnv, secretProblem, templateOf, variantOf } from './templates'
 import type { Actions } from './ui'
 
 // ---------- keychain ----------
@@ -241,7 +241,32 @@ async function sweepRun($: EngineInterface) {
 
 const rand = () => [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(16).padStart(2, '0')).join('')
 
-type Resolved = { env: Record<string, string>; files: string[]; missing: string[]; blocked: string[] }
+type Resolved = { env: Record<string, string>; files: string[]; missing: string[]; blocked: string[]; errors: string[] }
+
+// Supabase access tokens by profile, reused until shortly before they expire. Module memory only:
+// a reload or a new secret logs in again.
+const tokenCache = new Map<string, { token: string; until: number }>()
+
+// Password grant against Supabase Auth. The password travels in the request body on stdin.
+async function supabaseToken($: EngineInterface, name: string, url: string, email: string, password: string, anon: string) {
+  const hit = tokenCache.get(name)
+  if (hit && hit.until > now()) return { token: hit.token }
+  const base = url.replace(/\/+$/, '')
+  if (!/^https?:\/\//.test(base)) return { error: `项目地址 ${base} 不是 http(s) 地址` }
+  const r = await $.process.run(
+    ['/bin/sh', '-c', 'curl -sS --max-time 15 -X POST "$1/auth/v1/token?grant_type=password" -H "apikey: $SB_ANON" -H "Content-Type: application/json" --data-binary @-', 'sh', base],
+    { stdin: JSON.stringify({ email, password }), env: { SB_ANON: anon }, timeoutMs: 20_000 },
+  )
+  let body: { access_token?: string; expires_in?: number; error_description?: string; msg?: string; error?: string } = {}
+  try { body = JSON.parse(r.stdout) } catch {}
+  if (!body.access_token) {
+    const why = body.error_description || body.msg || body.error || r.stderr.trim() || `退出码 ${r.exitCode}`
+    return { error: `Supabase 登录失败（${name}）：${redact(why).slice(0, 160)}` }
+  }
+  remember(`${name}.token`, body.access_token)
+  tokenCache.set(name, { token: body.access_token, until: now() + Math.max(60, (body.expires_in ?? 3600) - 120) * 1000 })
+  return { token: body.access_token }
+}
 
 // The SSH_ASKPASS helper: prints $SSHPASS, which only the one ssh child carries. No secret in the file.
 async function askpassPath($: EngineInterface) {
@@ -261,12 +286,17 @@ async function resolveEnv($: EngineInterface, name: string, p: VaultProfile, onl
   const files: string[] = []
   const missing: string[] = []
   const blocked: string[] = []
+  const errors: string[] = []
   const own = new Set(Object.keys(namedVars(name, p, true)))
   const cache = new Map<string, string | undefined>()
   const secret = async (field: string) => {
     if (!cache.has(field)) {
       const v = await getSecret($, account(name, field))
-      if (v !== undefined) remember(`${name}.${field}`, v)
+      if (v !== undefined) {
+        remember(`${name}.${field}`, v)
+        const bad = secretProblem(p.type, field, v)
+        if (bad) errors.push(`${name}.${field} ${bad}，请在 /vault 面板里重新设置`)
+      }
       cache.set(field, v)
     }
     return cache.get(field)
@@ -293,12 +323,21 @@ async function resolveEnv($: EngineInterface, name: string, p: VaultProfile, onl
         continue
       }
       if (part === '{askpass}') { out += await askpassPath($); continue }
+      if (part === '{supabase_token}') {
+        const pw = await secret('password')
+        const anon = await secret('anon_key')
+        if (pw === undefined || anon === undefined) { ok = false; if (pw === undefined) missing.push(`${name}.password`); if (anon === undefined) missing.push(`${name}.anon_key`); break }
+        const t = await supabaseToken($, name, p.host ?? '', p.user ?? '', pw, anon)
+        if ('error' in t) { ok = false; errors.push(t.error!); break }
+        out += t.token
+        continue
+      }
       const f = /^\{(host|port|user|database)\}$/.exec(part)
       out += f ? String(p[f[1] as 'host'] ?? '') : part
     }
     if (ok) env[key] = out
   }
-  return { env, files, missing, blocked }
+  return { env, files, missing, blocked, errors: [...new Set(errors)] }
 }
 
 // Loads the secrets of every granted profile into the redaction table, so output stays masked
@@ -320,6 +359,7 @@ async function runWithProfile($: EngineInterface, name: string, p: VaultProfile,
   try {
     if (r.blocked.length) return { deny: `vault: profile ${name} 的客户端变量 ${r.blocked.join(', ')} 不允许设置，请在 /vault 面板里修改。` }
     if (r.missing.length) return { deny: `vault: 钥匙串里缺少密文 ${r.missing.join(', ')}，请在 /vault 面板里设置。` }
+    if (r.errors.length) return { deny: `vault: ${r.errors.join('；')}` }
     const started = now()
     const ran = await $.process.run(['/bin/bash', '-c', command], { env: r.env, timeoutMs })
     return { ...ran, ms: now() - started }
@@ -759,6 +799,10 @@ function actions($: EngineInterface): Actions {
   setSecret: async (n, field) => {
     const v = await askHidden($, `请输入 ${n}.${field} 的值（只保存到 macOS 钥匙串，Claude 看不到）`)
     if (v === undefined || v === '') return notice($, '已取消')
+    const type = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]?.type ?? ''
+    const bad = secretProblem(type, field, v)
+    if (bad) return notice($, `✖ 没有保存：${bad}`)
+    tokenCache.delete(n)
     remember(`${n}.${field}`, v)
     await setSecret($, account(n, field), v)
     await audit($, { event: 'set-secret', profile: n, field })
@@ -769,11 +813,15 @@ function actions($: EngineInterface): Actions {
     const file = await chooseFile($, `选择 ${n}.${field} 的内容文件（如私钥、kubeconfig）`)
     if (!file) return notice($, '已取消')
     const v = await $.fs.read(file)
+    const type = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]?.type ?? ''
+    const bad = secretProblem(type, field, v)
+    if (bad) return notice($, `✖ 没有保存：${bad}`)
+    tokenCache.delete(n)
     remember(`${n}.${field}`, v)
     await setSecret($, account(n, field), v)
     await audit($, { event: 'set-secret-file', profile: n, field })
     await refreshProfiles($)
-    await notice($, `${n}.${field} 已从文件写入钥匙串（原文件请自行妥善处理）`)
+    await notice($, `${n}.${field} 已从文件写入钥匙串（${v.length} 字节，原文件请自行妥善处理）`)
   },
   askDelete: n => void update($, confirmDeleteA, () => n),
   doDelete: async n => {
@@ -979,6 +1027,7 @@ export const register: Register = on => {
       files.push(...r.files)
       if (r.blocked.length) { await removeFiles($, files); return { deny: `vault: profile ${n} 的客户端变量 ${r.blocked.join(', ')} 不允许设置，请在 /vault 面板里修改。` } }
       if (r.missing.length) { await removeFiles($, files); return { deny: `vault: 钥匙串里缺少密文 ${r.missing.join(', ')}。` } }
+      if (r.errors.length) { await removeFiles($, files); return { deny: `vault: ${r.errors.join('；')}` } }
       Object.assign(env, r.env)
     }
 

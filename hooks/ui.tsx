@@ -222,8 +222,8 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
                   {editing && d.file
                     ? <Button key={`f-file-${d.name}`} label={ok ? '重新选择文件' : '从文件读取'} variant={ok ? 'secondary' : 'primary'} onPress={() => a.setSecretFromFile(editing, d.name)} />
                     : null}
-                  {editing
-                    ? <Button key={`f-set-${d.name}`} label={d.file ? '手动输入' : ok ? '重新设置' : '设置'} variant={!d.file && !ok ? 'primary' : 'secondary'} onPress={() => a.setSecret(editing, d.name)} />
+                  {editing && !d.file
+                    ? <Button key={`f-set-${d.name}`} label={ok ? '重新设置' : '设置'} variant={ok ? 'secondary' : 'primary'} onPress={() => a.setSecret(editing, d.name)} />
                     : null}
                   {editing && !d.file
                     ? <Button key={`f-file-${d.name}`} label="从文件读取" onPress={() => a.setSecretFromFile(editing, d.name)} />

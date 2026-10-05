@@ -1,9 +1,9 @@
 import type { VaultDirGrants, VaultGrant, VaultProfile } from '../types'
-import { namedVars, prefixOf } from './templates'
+import { isSecretTemplate, namedVars, prefixOf } from './templates'
 
 export const aliasKey = prefixOf
 
-const isSecretTpl = (tpl: string) => /\{secret/.test(tpl)
+const isSecretTpl = isSecretTemplate
 
 /** Everything a profile injects when chosen explicitly: its own `<NAME>_*` variables plus the client's. */
 export const varsOf = (name: string, p: VaultProfile): Record<string, string> => ({ ...namedVars(name, p), ...p.env })

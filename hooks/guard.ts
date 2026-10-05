@@ -26,6 +26,8 @@ const WRITES: Record<string, RegExp> = {
   mysql: /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|replace|load\s+data|rename)\b/i,
   mongo: /\b(insert\w*|update\w*|delete\w*|drop\w*|remove|replaceOne|bulkWrite|createIndex|renameCollection)\b/,
   redis: /\b(set|setex|mset|del|unlink|expire|hset|hdel|lpush|rpush|lpop|rpop|sadd|srem|zadd|zrem|flushall|flushdb|config\s+set|rename)\b/i,
+  // REST and RPC calls that change data; a GET or HEAD reads
+  supabase: /(-X|--request)\s*['"]?(POST|PUT|PATCH|DELETE)\b/i,
   kube: /\bkubectl\b[^|;&]*\b(delete|apply|create|edit|patch|replace|scale|rollout\s+(restart|undo)|drain|cordon|uncordon|taint|label|annotate|exec|cp|set|run|expose|autoscale)\b|\bhelm\b[^|;&]*\b(install|upgrade|uninstall|rollback)\b/,
 }
 
