@@ -879,6 +879,43 @@ function actions($: EngineInterface): Actions {
 }
 
 
+// /vault and its subcommands. Answered here, so the command file the plugin ships (which
+// lets the desktop app list the command before this module registers it) never runs.
+async function vaultCommand($: EngineInterface, e: { args: string; origin: { kind: string } }) {
+  const [sub = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
+  const byPerson = e.origin.kind === 'composer'
+  const openPane = async (view: VaultView = 'list') => {
+    await actions($).go(view)
+    await $.ui.open({ id: PANE, title: '🔐 Vault', focus: true })
+  }
+  if (sub !== '' && sub !== 'list' && !byPerson) return { text: 'vault: 该子命令只能由用户本人在输入框执行。' }
+  switch (sub) {
+    case '': await openPane(); return { text: 'Vault 面板已打开。' }
+    case 'grant': {
+      const [name, mode] = rest
+      if (!name || !((await read($, profilesA)) as Record<string, VaultProfile>)[name]) return { text: `没有 profile: ${name ?? ''}` }
+      const m = mode === 'write' ? 'write' : 'read'
+      await setGrant($, name, m)
+      return { text: `已授权 ${name}（${m === 'write' ? '读写' : '只读'}）给 ${cwd} 及其子目录，撤销前一直有效` }
+    }
+    case 'revoke': {
+      if (!rest[0]) return { text: '用法: /vault revoke <profile>' }
+      const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[rest[0]]
+      if (!g) return { text: `${rest[0]} 在当前目录没有授权` }
+      await setGrant($, rest[0], 'off', g.dir)
+      return { text: `已撤销 ${rest[0]} 在 ${g.dir} 的授权` }
+    }
+    case 'list': {
+      const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
+      const g = await activeGrants($)
+      return { text: Object.keys(profiles).map(n => `${g[n] ? `✅ ${g[n].mode}` : '  ─    '} ${n} (${profiles[n].type})`).join('\n') || '(空)' }
+    }
+    case 'export': await openPane('export'); return { text: '导出面板已打开。' }
+    case 'import': await openPane(); await actions($).startImport(); return { text: '导入：请在弹窗中选择文件。' }
+    default: return { text: '用法: /vault [grant <profile> [read|write]|revoke <profile>|list|export|import]' }
+  }
+}
+
 export const register: Register = on => {
   on('tool.call', { tool: 'mcp__vault__vault_list' }, async $ => {
     const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
@@ -1007,40 +1044,9 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'vault' }, async ($, e) => {
-    const [sub = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
-    const byPerson = e.origin.kind === 'composer'
-    const openPane = async (view: VaultView = 'list') => {
-      await actions($).go(view)
-      await $.ui.open({ id: PANE, title: '🔐 Vault', focus: true })
-    }
-    if (sub !== '' && sub !== 'list' && !byPerson) return { text: 'vault: 该子命令只能由用户本人在输入框执行。' }
-    switch (sub) {
-      case '': await openPane(); return { text: 'Vault 面板已打开。' }
-      case 'grant': {
-        const [name, mode] = rest
-        if (!name || !((await read($, profilesA)) as Record<string, VaultProfile>)[name]) return { text: `没有 profile: ${name ?? ''}` }
-        const m = mode === 'write' ? 'write' : 'read'
-        await setGrant($, name, m)
-        return { text: `已授权 ${name}（${m === 'write' ? '读写' : '只读'}）给 ${cwd} 及其子目录，撤销前一直有效` }
-      }
-      case 'revoke': {
-        if (!rest[0]) return { text: '用法: /vault revoke <profile>' }
-        const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[rest[0]]
-        if (!g) return { text: `${rest[0]} 在当前目录没有授权` }
-        await setGrant($, rest[0], 'off', g.dir)
-        return { text: `已撤销 ${rest[0]} 在 ${g.dir} 的授权` }
-      }
-      case 'list': {
-        const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
-        const g = await activeGrants($)
-        return { text: Object.keys(profiles).map(n => `${g[n] ? `✅ ${g[n].mode}` : '  ─    '} ${n} (${profiles[n].type})`).join('\n') || '(空)' }
-      }
-      case 'export': await openPane('export'); return { text: '导出面板已打开。' }
-      case 'import': await openPane(); await actions($).startImport(); return { text: '导入：请在弹窗中选择文件。' }
-      default: return { text: '用法: /vault [grant <profile> [read|write]|revoke <profile>|list|export|import]' }
-    }
-  })
+  // `vault` is registered by this module; `vault:vault` is the shipped commands/vault.md
+  on('command.run', { command: 'vault' }, ($, e) => vaultCommand($, e))
+  on('command.run', { command: 'vault:vault' }, ($, e) => vaultCommand($, e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     return renderPane($.ui.resolve(e), {

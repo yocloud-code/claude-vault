@@ -71,6 +71,9 @@ claude --plugin-dir /path/to/claude-vault
 **Claude 说凭证"未授权"？**
 在 `/vault` 面板里，给当前目录授权这个凭证。
 
+**新会话里找不到 `/vault`？**
+确认 `~/.claude/settings.json` 里配置了 `CLAUDE_CODE_PLUGIN_DIRS`，然后新开一个会话。在桌面版的命令菜单里搜 `vault`，显示的是 `/vault:vault`。
+
 **命令被拒绝"疑似写操作"？**
 当前授权是「只读」。需要写入时，在卡片上改成「读写」。
 
@@ -87,6 +90,8 @@ claude --plugin-dir /path/to/claude-vault
 | `/vault grant <名称> [read\|write]` | 授权给当前目录 |
 | `/vault revoke <名称>` | 撤销授权 |
 | `/vault export`、`/vault import` | 导出、导入 |
+
+桌面版的命令菜单里它显示为 `/vault:vault`，选它和直接输入 `/vault` 效果一样。
 
 面板快捷键：`n` 新建 · `e` 编辑 · `g` 授权管理 · `x` 导出 · `i` 导入 · `l` 审计日志 · `c` 一键清理 · `b` 返回
 
@@ -180,6 +185,9 @@ A secret was hidden automatically. This is expected.
 **Claude says the credential is "not granted"?**
 Grant it to the current directory in the `/vault` pane.
 
+**`/vault` is missing in a new session?**
+Check that `CLAUDE_CODE_PLUGIN_DIRS` is set in `~/.claude/settings.json`, then start a new session. In the desktop app's command menu, search for `vault`; it is listed as `/vault:vault`.
+
 **A command was refused as a "possible write"?**
 The grant is read-only. Switch it to "读写" (write) on the card.
 
@@ -196,6 +204,8 @@ The grant is read-only. Switch it to "读写" (write) on the card.
 | `/vault grant <name> [read\|write]` | grant to the current directory |
 | `/vault revoke <name>` | revoke a grant |
 | `/vault export`, `/vault import` | export, import |
+
+In the desktop app's command menu it is listed as `/vault:vault`; picking it is the same as typing `/vault`.
 
 Pane hotkeys: `n` new · `e` edit · `g` grants · `x` export · `i` import · `l` audit log · `c` cleanup · `b` back
 
