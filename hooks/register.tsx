@@ -50,10 +50,40 @@ async function setSecret($: EngineInterface, acct: string, value: string): Promi
   const line = `add-generic-password -U -s ${SERVICE} -a ${acct} -l "Claude Vault ${acct}" -w b64:${b64encode(value)}\n`
   const r = await $.process.run(['/usr/bin/security', '-i'], { stdin: line })
   if (r.exitCode !== 0 || /error/i.test(r.stderr)) throw new Error('keychain write failed')
+  await bumpRevision($)
 }
 
 async function deleteSecret($: EngineInterface, acct: string): Promise<void> {
   await $.process.run(['/usr/bin/security', 'delete-generic-password', '-s', SERVICE, '-a', acct])
+  await bumpRevision($)
+}
+
+// ---------- sync between sessions ----------
+// Every session keeps the profiles and grants in its own state. A change made in one session
+// writes a new revision; the others notice it (a timer, the pane opening, a tool call) and
+// reload from disk.
+let seenRevision = ''
+let seenAuditMtime = 0
+
+async function bumpRevision($: EngineInterface) {
+  const { dir } = await paths($)
+  seenRevision = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  await $.fs.write(`${dir}/revision`, seenRevision)
+}
+
+async function syncFromDisk($: EngineInterface) {
+  const { dir, audit: auditFile } = await paths($)
+  const rev = await $.fs.read(`${dir}/revision`).catch(() => '')
+  if (rev && rev !== seenRevision) {
+    seenRevision = rev
+    await refreshProfiles($)
+    await refreshGrants($)
+  }
+  const mtime = (await $.fs.stat(auditFile).catch(() => undefined))?.mtimeMs ?? 0
+  if (mtime !== seenAuditMtime) {
+    seenAuditMtime = mtime
+    await loadUsage($)
+  }
 }
 
 // ---------- native dialogs ----------
@@ -109,6 +139,7 @@ async function loadProfiles($: EngineInterface): Promise<Record<string, VaultPro
 async function saveProfiles($: EngineInterface, all: Record<string, VaultProfile>) {
   const { profiles } = await paths($)
   await writePrivate($, profiles, JSON.stringify(all, null, 2) + '\n')
+  await bumpRevision($)
 }
 
 async function loadAllow($: EngineInterface, cwd: string): Promise<{ allow: Allow; raw: string | null }> {
@@ -139,6 +170,7 @@ async function saveGrantFile($: EngineInterface, dirs: VaultDirGrants) {
   const { grants } = await paths($)
   const clean = Object.fromEntries(Object.entries(dirs).filter(([, e]) => Object.keys(e).length))
   await writePrivate($, grants, JSON.stringify({ version: 1, dirs: clean }, null, 2) + '\n')
+  await bumpRevision($)
 }
 
 // The session's directory as a real path, so a symlinked spelling meets the same grants.
@@ -599,6 +631,7 @@ async function registerTools($: EngineInterface) {
 }
 
 async function checkUse($: EngineInterface, name: string, command: string) {
+  await syncFromDisk($)
   const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
   const p = profiles[name]
   if (!p) return { deny: `vault: 没有名为 ${name} 的 profile。` }
@@ -932,13 +965,16 @@ function actions($: EngineInterface): Actions {
 async function vaultCommand($: EngineInterface, e: { args: string; origin: { kind: string } }) {
   const [sub = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
   const byPerson = e.origin.kind === 'composer'
+  // Opening the pane reloads what other sessions changed, and does not take the keyboard from
+  // the prompt: a click on the pane gives it the keys.
   const openPane = async (view: VaultView = 'list') => {
+    await syncFromDisk($)
     await actions($).go(view)
-    await $.ui.open({ id: PANE, title: '🔐 Vault', focus: true })
+    await $.ui.open({ id: PANE, title: '🔐 Vault' })
   }
   if (sub !== '' && sub !== 'list' && !byPerson) return { text: 'vault: 该子命令只能由用户本人在输入框执行。' }
   switch (sub) {
-    case '': await openPane(); return { text: 'Vault 面板已打开。' }
+    case '': await openPane(); return {}
     case 'grant': {
       const [name, mode] = rest
       if (!name || !((await read($, profilesA)) as Record<string, VaultProfile>)[name]) return { text: `没有 profile: ${name ?? ''}` }
@@ -958,7 +994,7 @@ async function vaultCommand($: EngineInterface, e: { args: string; origin: { kin
       const g = await activeGrants($)
       return { text: Object.keys(profiles).map(n => `${g[n] ? `✅ ${g[n].mode}` : '  ─    '} ${n} (${profiles[n].type})`).join('\n') || '(空)' }
     }
-    case 'export': await openPane('export'); return { text: '导出面板已打开。' }
+    case 'export': await openPane('export'); return {}
     case 'import': await openPane(); await actions($).startImport(); return { text: '导入：请在弹窗中选择文件。' }
     default: return { text: '用法: /vault [grant <profile> [read|write]|revoke <profile>|list|export|import]' }
   }
@@ -966,6 +1002,7 @@ async function vaultCommand($: EngineInterface, e: { args: string; origin: { kin
 
 export const register: Register = on => {
   on('tool.call', { tool: 'mcp__vault__vault_list' }, async $ => {
+    await syncFromDisk($)
     const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
     const grants = await activeGrants($)
     const out = Object.entries(profiles).map(([n, p]) => ({
@@ -1003,6 +1040,7 @@ export const register: Register = on => {
     const peek = peekReason(command)
     if (peek) return { deny: peek }
 
+    await syncFromDisk($)
     const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
     const granted = new Set(Object.keys(await activeGrants($)))
     const chosen = selectProfiles(command, profiles, granted)
@@ -1080,6 +1118,8 @@ export const register: Register = on => {
       name: 'vault',
       description: '凭证保险库：管理数据库/服务器/集群凭证与目录授权',
       argumentHint: '[grant <p> [read|write]|revoke <p>|list|export|import]',
+      // typed while Claude is working, it opens the pane at once instead of waiting for the turn
+      immediate: true,
     })
     await refreshProfiles($)
     await loadUsage($)
@@ -1090,6 +1130,9 @@ export const register: Register = on => {
     await warmRedaction($)
     await sweepRun($)
     $.clock.every(60_000, () => void sweepRun($))
+    // pick up changes other sessions make (cheap: one small file read)
+    await syncFromDisk($)
+    $.clock.every(3_000, () => void syncFromDisk($))
     // A reload leaves an open pane drawn by the previous module, whose buttons no longer answer
     // (the desktop logs "ui_press not handled"): redraw it so its handlers are this module's.
     if ((await $.ui.panes()).some(pane => pane.id === PANE)) $.ui.invalidate('ui.render')
