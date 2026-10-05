@@ -58,3 +58,13 @@ test('supabase: a login token per profile, injected only when referenced', () =>
   expect(secretProblem('supabase', 'anon_key', 'not-a-key')).toBeDefined()
   expect(secretProblem('supabase', 'anon_key', 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.c2lnbmF0dXJl')).toBeUndefined()
 })
+
+test('valid kubeconfigs are accepted: quoted values and the JSON form', () => {
+  const k = b64(2200)
+  const quoted = kubeconfig(`    client-certificate-data: "${b64(1500)}"\n    client-key-data: "${k}"`)
+  expect(secretProblem('kube', 'kubeconfig', quoted)).toBeUndefined()
+  const json = JSON.stringify({ apiVersion: 'v1', clusters: [{ name: 'a' }], users: [{ name: 'u', user: { 'client-certificate-data': b64(1500), 'client-key-data': k } }] })
+  expect(secretProblem('kube', 'kubeconfig', json)).toBeUndefined()
+  const jsonCut = JSON.stringify({ apiVersion: 'v1', clusters: [{ name: 'a' }], users: [{ name: 'u', user: { 'client-certificate-data': b64(1500) } }] })
+  expect(secretProblem('kube', 'kubeconfig', jsonCut)).toContain('client-key-data')
+})

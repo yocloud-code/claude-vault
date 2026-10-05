@@ -281,7 +281,8 @@ const tokenCache = new Map<string, { token: string; until: number }>()
 
 // Password grant against Supabase Auth. The password travels in the request body on stdin.
 async function supabaseToken($: EngineInterface, name: string, url: string, email: string, password: string, anon: string) {
-  const hit = tokenCache.get(name)
+  const key = `${name}\n${url}\n${email}`
+  const hit = tokenCache.get(key)
   if (hit && hit.until > now()) return { token: hit.token }
   const base = url.replace(/\/+$/, '')
   if (!/^https?:\/\//.test(base)) return { error: `项目地址 ${base} 不是 http(s) 地址` }
@@ -296,7 +297,7 @@ async function supabaseToken($: EngineInterface, name: string, url: string, emai
     return { error: `Supabase 登录失败（${name}）：${redact(why).slice(0, 160)}` }
   }
   remember(`${name}.token`, body.access_token)
-  tokenCache.set(name, { token: body.access_token, until: now() + Math.max(60, (body.expires_in ?? 3600) - 120) * 1000 })
+  tokenCache.set(key, { token: body.access_token, until: now() + Math.max(60, (body.expires_in ?? 3600) - 120) * 1000 })
   return { token: body.access_token }
 }
 
@@ -835,7 +836,7 @@ function actions($: EngineInterface): Actions {
     const type = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]?.type ?? ''
     const bad = secretProblem(type, field, v)
     if (bad) return notice($, `✖ 没有保存：${bad}`)
-    tokenCache.delete(n)
+    for (const k of [...tokenCache.keys()]) if (k.startsWith(`${n}\n`)) tokenCache.delete(k)
     remember(`${n}.${field}`, v)
     await setSecret($, account(n, field), v)
     await audit($, { event: 'set-secret', profile: n, field })
@@ -849,7 +850,7 @@ function actions($: EngineInterface): Actions {
     const type = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]?.type ?? ''
     const bad = secretProblem(type, field, v)
     if (bad) return notice($, `✖ 没有保存：${bad}`)
-    tokenCache.delete(n)
+    for (const k of [...tokenCache.keys()]) if (k.startsWith(`${n}\n`)) tokenCache.delete(k)
     remember(`${n}.${field}`, v)
     await setSecret($, account(n, field), v)
     await audit($, { event: 'set-secret-file', profile: n, field })
@@ -964,7 +965,9 @@ function actions($: EngineInterface): Actions {
 // lets the desktop app list the command before this module registers it) never runs.
 async function vaultCommand($: EngineInterface, e: { args: string; origin: { kind: string } }) {
   const [sub = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
-  const byPerson = e.origin.kind === 'composer'
+  // The person types at the terminal (composer), in the desktop app (sdk, its host) or on the
+  // phone (bridge). Other sessions, channels, schedules and agents cannot grant or export.
+  const byPerson = ['composer', 'sdk', 'bridge'].includes(e.origin.kind)
   // Opening the pane reloads what other sessions changed, and does not take the keyboard from
   // the prompt: a click on the pane gives it the keys.
   const openPane = async (view: VaultView = 'list') => {
@@ -972,7 +975,7 @@ async function vaultCommand($: EngineInterface, e: { args: string; origin: { kin
     await actions($).go(view)
     await $.ui.open({ id: PANE, title: '🔐 Vault' })
   }
-  if (sub !== '' && sub !== 'list' && !byPerson) return { text: 'vault: 该子命令只能由用户本人在输入框执行。' }
+  if (sub !== '' && sub !== 'list' && !byPerson) return { text: '该子命令只能由用户本人在输入框执行。' }
   switch (sub) {
     case '': await openPane(); return {}
     case 'grant': {

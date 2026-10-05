@@ -260,15 +260,7 @@ export const envProblems = (env: Record<string, string>) =>
 export const secretProblem = (type: string, field: string, value: string): string | undefined => {
   const v = value.trim()
   if (!v) return '内容为空'
-  if (type === 'kube' && field === 'kubeconfig') {
-    if (!/^\s*clusters\s*:/m.test(v) || !/^\s*users\s*:/m.test(v)) return 'kubeconfig 不完整：缺少 clusters 或 users 段'
-    if (/client-certificate-data\s*:/.test(v) && !/client-key-data\s*:/.test(v) && !/client-key\s*:/.test(v)) {
-      return 'kubeconfig 不完整：有 client-certificate-data 却没有 client-key-data（多半是粘贴被截断）'
-    }
-    const blob = /client-key-data\s*:\s*(\S*)/.exec(v)?.[1]
-    if (blob !== undefined && (blob.length < 100 || !/^[A-Za-z0-9+/=]+$/.test(blob))) return 'kubeconfig 不完整：client-key-data 内容被截断'
-    return undefined
-  }
+  if (type === 'kube' && field === 'kubeconfig') return kubeconfigProblem(v)
   if (type === 'ssh' && field === 'key') {
     if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(v)) return '不是私钥文件：缺少 BEGIN PRIVATE KEY 行'
     if (!/-----END [A-Z ]*PRIVATE KEY-----\s*$/.test(v)) return '私钥不完整：缺少 END PRIVATE KEY 行（多半是粘贴被截断）'
@@ -277,5 +269,28 @@ export const secretProblem = (type: string, field: string, value: string): strin
   if (type === 'supabase' && field === 'anon_key' && !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(v) && !/^sb_publishable_/.test(v)) {
     return 'anon key 格式不对：应为 eyJ… 开头的 JWT 或 sb_publishable_ 开头的密钥'
   }
+  return undefined
+}
+
+// A kubeconfig in YAML or JSON. Each user with a client certificate needs its key, inline or as
+// a path; inline key data that is too short or not base64 was cut off.
+const kubeconfigProblem = (v: string): string | undefined => {
+  const truncated = 'kubeconfig 不完整：有 client-certificate-data 却没有 client-key-data（多半是粘贴被截断）'
+  const shortKey = 'kubeconfig 不完整：client-key-data 内容被截断'
+  const badKey = (data: string) => data.length < 100 || !/^[A-Za-z0-9+/=]+$/.test(data)
+  if (v.startsWith('{')) {
+    let doc: { clusters?: unknown; users?: { user?: Record<string, unknown> }[] }
+    try { doc = JSON.parse(v) } catch { return 'kubeconfig 不完整：JSON 无法解析' }
+    if (!Array.isArray(doc.clusters) || !Array.isArray(doc.users)) return 'kubeconfig 不完整：缺少 clusters 或 users 段'
+    for (const u of doc.users) {
+      const user = u?.user ?? {}
+      if (user['client-certificate-data'] && !user['client-key-data'] && !user['client-key']) return truncated
+      if (typeof user['client-key-data'] === 'string' && badKey(user['client-key-data'])) return shortKey
+    }
+    return undefined
+  }
+  if (!/^\s*clusters\s*:/m.test(v) || !/^\s*users\s*:/m.test(v)) return 'kubeconfig 不完整：缺少 clusters 或 users 段'
+  if (/client-certificate-data\s*:/.test(v) && !/client-key-data\s*:/.test(v) && !/client-key\s*:/.test(v)) return truncated
+  for (const m of v.matchAll(/client-key-data\s*:\s*["']?([^"'\s]*)["']?/g)) if (badKey(m[1])) return shortKey
   return undefined
 }
