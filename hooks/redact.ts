@@ -1,5 +1,7 @@
 // Plaintexts seen this module lifetime. Never written to $.state or $.store.
 const known = new Map<string, string>()
+// `known` longest first, so a full value wins over its substrings; rebuilt only after a change
+let ordered: [string, string][] | null = null
 
 const variants = (v: string) => {
   const out = [v]
@@ -11,6 +13,7 @@ const variants = (v: string) => {
 
 export const remember = (label: string, value: string) => {
   if (value.length < 4) return
+  ordered = null
   for (const v of variants(value)) known.set(v, label)
   // multi-line secrets (keys, kubeconfigs): also mask each substantial line
   for (const line of value.split('\n')) if (line.trim().length >= 16) known.set(line.trim(), label)
@@ -23,8 +26,8 @@ export const hasSecrets = (text: string) => {
 
 export const redact = (text: string) => {
   if (!known.size) return text
-  // longest first so a full value wins over its substrings
-  for (const [v, label] of [...known].sort((a, b) => b[0].length - a[0].length)) {
+  ordered ??= [...known].sort((a, b) => b[0].length - a[0].length)
+  for (const [v, label] of ordered) {
     if (text.includes(v)) text = text.split(v).join(`«vault:${label}»`)
   }
   return text

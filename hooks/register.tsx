@@ -31,7 +31,18 @@ const account = (profile: string, field: string) => {
   return acct
 }
 
+// Values already read, by account. The redaction table holds the same plaintexts, so this adds
+// no exposure; it is dropped whenever a secret, profile or grant changes in any session.
+const secretCache = new Map<string, string | undefined>()
+
 async function getSecret($: EngineInterface, acct: string): Promise<string | undefined> {
+  if (secretCache.has(acct)) return secretCache.get(acct)
+  const v = await readSecret($, acct)
+  secretCache.set(acct, v)
+  return v
+}
+
+async function readSecret($: EngineInterface, acct: string): Promise<string | undefined> {
   const r = await $.process.run(['/usr/bin/security', 'find-generic-password', '-s', SERVICE, '-a', acct, '-w'])
   if (r.exitCode !== 0) return undefined
   const raw = r.stdout.replace(/\n$/, '')
@@ -50,11 +61,13 @@ async function setSecret($: EngineInterface, acct: string, value: string): Promi
   const line = `add-generic-password -U -s ${SERVICE} -a ${acct} -l "Claude Vault ${acct}" -w b64:${b64encode(value)}\n`
   const r = await $.process.run(['/usr/bin/security', '-i'], { stdin: line })
   if (r.exitCode !== 0 || /error/i.test(r.stderr)) throw new Error('keychain write failed')
+  secretCache.delete(acct)
   await bumpRevision($)
 }
 
 async function deleteSecret($: EngineInterface, acct: string): Promise<void> {
   await $.process.run(['/usr/bin/security', 'delete-generic-password', '-s', SERVICE, '-a', acct])
+  secretCache.delete(acct)
   await bumpRevision($)
 }
 
@@ -71,20 +84,25 @@ async function bumpRevision($: EngineInterface) {
   await $.fs.write(`${dir}/revision`, seenRevision)
 }
 
-async function syncFromDisk($: EngineInterface) {
+async function syncFromDisk($: EngineInterface, opts: { usage?: boolean } = {}) {
   const { dir, audit: auditFile } = await paths($)
   const rev = await $.fs.read(`${dir}/revision`).catch(() => '')
   if (rev && rev !== seenRevision) {
     seenRevision = rev
+    secretCache.clear()
     await refreshProfiles($)
     await refreshGrants($)
   }
+  // usage counts only show in the pane: parse the audit log only for it
+  if (!opts.usage) return
   const mtime = (await $.fs.stat(auditFile).catch(() => undefined))?.mtimeMs ?? 0
   if (mtime !== seenAuditMtime) {
     seenAuditMtime = mtime
     await loadUsage($)
   }
 }
+
+const paneIsOpen = async ($: EngineInterface) => (await $.ui.panes()).some(pane => pane.id === PANE)
 
 // ---------- native dialogs ----------
 
@@ -377,12 +395,11 @@ async function resolveEnv($: EngineInterface, name: string, p: VaultProfile, onl
 // after a reload (the table lives in module memory) and before a profile's first use.
 async function warmRedaction($: EngineInterface) {
   const profiles = (await read($, profilesA)) as Record<string, VaultProfile>
-  for (const n of Object.keys(await activeGrants($))) {
-    for (const f of profiles[n]?.secrets ?? []) {
-      const v = await getSecret($, account(n, f))
-      if (v !== undefined) remember(`${n}.${f}`, v)
-    }
-  }
+  const wanted = Object.keys(await activeGrants($)).flatMap(n => (profiles[n]?.secrets ?? []).map(f => [n, f] as const))
+  await Promise.all(wanted.map(async ([n, f]) => {
+    const v = await getSecret($, account(n, f))
+    if (v !== undefined) remember(`${n}.${f}`, v)
+  }))
 }
 
 // Runs a command with one profile's variables (its own and its client's). Refuses before running
@@ -520,15 +537,19 @@ function notice($: EngineInterface, text: string) {
 // Appends run one after another: the log is read, extended and rewritten, so two concurrent
 // appends (parallel tool calls, the expiry timer) would otherwise drop one of the lines.
 let auditQueue: Promise<void> = Promise.resolve()
+let appendsSinceTrim = 0
 
 async function audit($: EngineInterface, entry: Record<string, unknown>) {
   const write = async () => {
     const { audit: file } = await paths($)
-    let old = ''
-    try { old = await $.fs.read(file) } catch {}
-    const line = JSON.stringify({ t: new Date().toISOString(), cwd, ...entry })
-    const lines = (old + redact(line) + '\n').split('\n').filter(Boolean).slice(-2000)
-    await writePrivate($, file, lines.join('\n') + '\n')
+    const line = redact(JSON.stringify({ t: new Date().toISOString(), cwd, ...entry })) + '\n'
+    await $.process.run(['/bin/sh', '-c', 'umask 077; mkdir -p "$(dirname "$1")" && cat >> "$1"', 'sh', file], { stdin: line })
+    if (++appendsSinceTrim >= 200) {
+      appendsSinceTrim = 0
+      const all = await $.fs.read(file).catch(() => '')
+      const lines = all.split('\n').filter(Boolean)
+      if (lines.length > 2000) await writePrivate($, file, lines.slice(-2000).join('\n') + '\n')
+    }
   }
   const done = auditQueue.then(write, write)
   auditQueue = done.catch(() => {})
@@ -564,10 +585,9 @@ async function loadUsage($: EngineInterface) {
 
 async function refreshProfiles($: EngineInterface) {
   const profiles = await loadProfiles($)
-  const stored: Record<string, boolean> = {}
-  for (const [n, p] of Object.entries(profiles)) {
-    for (const f of p.secrets) stored[`${n}.${f}`] = await hasSecret($, account(n, f))
-  }
+  const pairs = Object.entries(profiles).flatMap(([n, p]) => p.secrets.map(f => [n, f] as const))
+  const found = await Promise.all(pairs.map(([n, f]) => hasSecret($, account(n, f))))
+  const stored: Record<string, boolean> = Object.fromEntries(pairs.map(([n, f], i) => [`${n}.${f}`, found[i]]))
   await update($, profilesA, () => profiles)
   await update($, storedA, () => stored)
   return profiles
@@ -971,7 +991,7 @@ async function vaultCommand($: EngineInterface, e: { args: string; origin: { kin
   // Opening the pane reloads what other sessions changed, and does not take the keyboard from
   // the prompt: a click on the pane gives it the keys.
   const openPane = async (view: VaultView = 'list') => {
-    await syncFromDisk($)
+    await syncFromDisk($, { usage: true })
     await actions($).go(view)
     await $.ui.open({ id: PANE, title: '🔐 Vault' })
   }
@@ -1124,21 +1144,26 @@ export const register: Register = on => {
       // typed while Claude is working, it opens the pane at once instead of waiting for the turn
       immediate: true,
     })
+    // what is on disk now counts as seen, so the first sync does not load it all a second time
+    const { dir } = await paths($)
+    seenRevision = await $.fs.read(`${dir}/revision`).catch(() => '')
     await refreshProfiles($)
-    await loadUsage($)
     await migrateLegacyAllowlist($)
     await refreshGrants($)
     await registerTools($)
-    // grants survive a reload in $.state, the redaction table does not: reload it
-    await warmRedaction($)
-    await sweepRun($)
+    // grants survive a reload in $.state, the redaction table does not: reload it without holding
+    // up the first prompt (a command that injects a secret remembers it on its own)
+    void warmRedaction($)
+    void sweepRun($)
     $.clock.every(60_000, () => void sweepRun($))
-    // pick up changes other sessions make (cheap: one small file read)
-    await syncFromDisk($)
-    $.clock.every(3_000, () => void syncFromDisk($))
+    // tool calls sync on demand; the timer only keeps an open pane current
+    $.clock.every(3_000, async () => { if (await paneIsOpen($)) await syncFromDisk($, { usage: true }) })
     // A reload leaves an open pane drawn by the previous module, whose buttons no longer answer
     // (the desktop logs "ui_press not handled"): redraw it so its handlers are this module's.
-    if ((await $.ui.panes()).some(pane => pane.id === PANE)) $.ui.invalidate('ui.render')
+    if (await paneIsOpen($)) {
+      await loadUsage($)
+      $.ui.invalidate('ui.render')
+    }
     return next(e)
   })
 
