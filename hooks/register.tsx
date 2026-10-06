@@ -42,12 +42,37 @@ async function getSecret($: EngineInterface, acct: string): Promise<string | und
   return v
 }
 
-async function readSecret($: EngineInterface, acct: string): Promise<string | undefined> {
+async function readItem($: EngineInterface, acct: string): Promise<string | undefined> {
   const r = await $.process.run(['/usr/bin/security', 'find-generic-password', '-s', SERVICE, '-a', acct, '-w'])
-  if (r.exitCode !== 0) return undefined
-  const raw = r.stdout.replace(/\n$/, '')
-  // Values the mod writes are prefixed so multi-line secrets survive `security -w`.
+  return r.exitCode === 0 ? r.stdout.replace(/\n$/, '') : undefined
+}
+
+async function readSecret($: EngineInterface, acct: string): Promise<string | undefined> {
+  const raw = await readItem($, acct)
+  if (raw === undefined) return undefined
+  // Values the mod writes are prefixed so multi-line secrets survive `security -w`; a long one
+  // is split over `<acct>.partN` items (see setSecret).
+  const split = /^parts:(\d+)$/.exec(raw)
+  if (split) {
+    const parts = await Promise.all(Array.from({ length: Number(split[1]) }, (_, i) => readItem($, partAccount(acct, i + 1))))
+    if (parts.some(x => x === undefined)) return undefined
+    return b64decode(parts.join(''))
+  }
   return raw.startsWith('b64:') ? b64decode(raw.slice(4)) : raw
+}
+
+const partAccount = (acct: string, i: number) => `${acct}.part${i}`
+
+// `security -i` reads lines of at most 4096 bytes and silently drops the rest, so a long value
+// (a kubeconfig) is stored in pieces well under that.
+const PART = 3000
+
+// Removes the pieces of a split value from `from` on, until one is missing.
+async function deleteParts($: EngineInterface, acct: string, from = 1) {
+  for (let i = from; ; i++) {
+    const r = await $.process.run(['/usr/bin/security', 'delete-generic-password', '-s', SERVICE, '-a', partAccount(acct, i)])
+    if (r.exitCode !== 0) return
+  }
 }
 
 async function hasSecret($: EngineInterface, acct: string): Promise<boolean> {
@@ -58,15 +83,23 @@ async function hasSecret($: EngineInterface, acct: string): Promise<boolean> {
 // The value travels on stdin to `security -i`, never on argv, so `ps` cannot see it.
 async function setSecret($: EngineInterface, acct: string, value: string): Promise<void> {
   if (!SAFE.test(acct)) throw new Error(`invalid account name: ${acct}`)
-  const line = `add-generic-password -U -s ${SERVICE} -a ${acct} -l "Claude Vault ${acct}" -w b64:${b64encode(value)}\n`
-  const r = await $.process.run(['/usr/bin/security', '-i'], { stdin: line })
+  const enc = b64encode(value)
+  const item = (a: string, data: string) => `add-generic-password -U -s ${SERVICE} -a ${a} -l "Claude Vault ${a}" -w ${data}\n`
+  const pieces = enc.length > PART ? Array.from({ length: Math.ceil(enc.length / PART) }, (_, i) => enc.slice(i * PART, (i + 1) * PART)) : []
+  // the pieces first, the item that points at them last
+  const lines = pieces.map((c, i) => item(partAccount(acct, i + 1), c)).join('') + item(acct, pieces.length ? `parts:${pieces.length}` : `b64:${enc}`)
+  const r = await $.process.run(['/usr/bin/security', '-i'], { stdin: lines })
   if (r.exitCode !== 0 || /error/i.test(r.stderr)) throw new Error('keychain write failed')
+  await deleteParts($, acct, pieces.length + 1)
   secretCache.delete(acct)
+  // read it back: a value the Keychain shortened must not pass for a stored one
+  if ((await readSecret($, acct)) !== value) throw new Error('keychain write incomplete')
   await bumpRevision($)
 }
 
 async function deleteSecret($: EngineInterface, acct: string): Promise<void> {
   await $.process.run(['/usr/bin/security', 'delete-generic-password', '-s', SERVICE, '-a', acct])
+  await deleteParts($, acct)
   secretCache.delete(acct)
   await bumpRevision($)
 }
