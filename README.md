@@ -63,27 +63,6 @@ claude --plugin-dir /path/to/claude-vault
 - **导入**：选择 `.cvault` 文件，输入口令，预览后确认。冲突的凭证可以选择覆盖、跳过或另存一份。导入后需要重新授权。
 - **一键清理**：清空全部凭证、钥匙串里的 vault 密码、所有授权和日志。会弹出确认框，**无法撤销**，请先导出备份。钥匙串里其他应用的密码不受影响。
 
-### 常见问题
-
-**输出里出现 `«vault:prod-db.password»`？**
-这是密码被自动隐藏了，属于正常现象。
-
-**Claude 说凭证"未授权"？**
-在 `/vault` 面板里，给当前目录授权这个凭证。
-
-**新会话里找不到 `/vault`？**
-确认 `~/.claude/settings.json` 里配置了 `CLAUDE_CODE_PLUGIN_DIRS`，然后新开一个会话。在桌面版的命令菜单里搜 `vault`，显示的是 `/vault:vault`。
-
-**提示 kubeconfig 或私钥"不完整"？**
-保存时内容被截断了。在编辑页点「从文件读取」，选择原始文件重新导入。私钥、kubeconfig 这类文件只能从文件读取。旧版本保存超过约 3KB 的内容时会被截断，升级后重新导入一次即可；现在每次保存都会回读校验，不完整会直接报错。
-
-**命令被拒绝"疑似写操作"？**
-当前授权是「只读」。需要写入时，在卡片上改成「读写」。
-
-**能防住什么，不能防住什么？**
-- 能防住：Claude 读取钥匙串或 vault 文件、在注入了凭证的命令里导出环境变量、导入的配置里夹带能执行代码的危险变量。
-- 防不住：密码被变换成其他形式后再输出（例如逐字符拆开），这类内容无法自动识别。
-
 ### 命令
 
 | 命令 | 作用 |
@@ -180,27 +159,6 @@ The edit page lists every variable a credential provides.
 - **Export**: tick credentials, set a passphrase (12+ characters), and get one encrypted `.cvault` file holding the configuration and secrets.
 - **Import**: pick the `.cvault` file, enter the passphrase, review, confirm. For conflicts, choose overwrite, skip, or keep a copy. Imported credentials need to be granted again.
 - **One-click cleanup** ("🧹 一键清理"): wipes every credential, every vault secret in the Keychain, all grants and logs. It asks for confirmation and **cannot be undone**, so export first. Other apps' Keychain items are untouched.
-
-### FAQ
-
-**The output shows `«vault:prod-db.password»`?**
-A secret was hidden automatically. This is expected.
-
-**Claude says the credential is "not granted"?**
-Grant it to the current directory in the `/vault` pane.
-
-**`/vault` is missing in a new session?**
-Check that `CLAUDE_CODE_PLUGIN_DIRS` is set in `~/.claude/settings.json`, then start a new session. In the desktop app's command menu, search for `vault`; it is listed as `/vault:vault`.
-
-**A kubeconfig or private key is reported as "incomplete"?**
-It was cut off when saved. Use "从文件读取" (From file) on the edit page and pick the original file. Key and kubeconfig secrets can only be read from a file. Older versions cut off anything over about 3KB; after updating, import the file once more. Every save is now read back and checked, so an incomplete value is reported straight away.
-
-**A command was refused as a "possible write"?**
-The grant is read-only. Switch it to "读写" (write) on the card.
-
-**What is protected, and what isn't?**
-- Blocked: Claude reading the Keychain or vault files, dumping the environment in a command that has credentials injected, and imported configurations that try to set code-running variables.
-- Not caught: a secret transformed before printing (e.g. split into single characters).
 
 ### Commands
 
