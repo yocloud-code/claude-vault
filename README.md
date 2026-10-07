@@ -33,7 +33,7 @@ claude --plugin-dir /path/to/claude-vault
 
 ### 快速上手
 
-1. **打开面板**：输入 `/vault`。
+1. **打开面板**：输入 `/vault`。桌面版也可以点输入框上方的「🔐 Vault」按钮，Claude 正在工作时也能立即打开。
 2. **新建凭证**：点「＋ 新建」，选类型（PostgreSQL、SSH、Kubernetes……），填主机、用户等信息，写一句描述（Claude 会据此选择凭证），点「创建」。
 3. **输入密码**：创建后会自动弹出系统的密码输入框（私钥、kubeconfig 会弹出文件选择），内容直接存进钥匙串，界面上永远不会显示。
 4. **测试连接**：点卡片上的「测试连接」，确认能连上。
@@ -130,7 +130,7 @@ To load it every time (desktop app included), add to `~/.claude/settings.json`:
 
 ### Getting started
 
-1. **Open the pane**: type `/vault`.
+1. **Open the pane**: type `/vault`. In the desktop app you can also click the "🔐 Vault" button above the input box, which opens the pane at once even while Claude is working.
 2. **Create a credential**: click "＋ 新建" (New), pick a type (PostgreSQL, SSH, Kubernetes, …), fill in host and user, add a short description (Claude uses it to pick the right credential), and click "创建" (Create).
 3. **Enter the secret**: a native password dialog opens right away (a file picker for keys and kubeconfigs). The value goes straight to the Keychain and is never shown.
 4. **Test it**: click "测试连接" (Test connection) on the card.

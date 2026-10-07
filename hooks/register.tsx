@@ -1014,6 +1014,14 @@ function actions($: EngineInterface): Actions {
 }
 
 
+// Opening the pane reloads what other sessions changed, and does not take the keyboard from
+// the prompt: a click on the pane gives it the keys.
+async function openVaultPane($: EngineInterface, view: VaultView = 'list') {
+  await syncFromDisk($, { usage: true })
+  await actions($).go(view)
+  await $.ui.open({ id: PANE, title: '🔐 Vault' })
+}
+
 // /vault and its subcommands. Answered here, so the command file the plugin ships (which
 // lets the desktop app list the command before this module registers it) never runs.
 async function vaultCommand($: EngineInterface, e: { args: string; origin: { kind: string } }) {
@@ -1021,13 +1029,7 @@ async function vaultCommand($: EngineInterface, e: { args: string; origin: { kin
   // The person types at the terminal (composer), in the desktop app (sdk, its host) or on the
   // phone (bridge). Other sessions, channels, schedules and agents cannot grant or export.
   const byPerson = ['composer', 'sdk', 'bridge'].includes(e.origin.kind)
-  // Opening the pane reloads what other sessions changed, and does not take the keyboard from
-  // the prompt: a click on the pane gives it the keys.
-  const openPane = async (view: VaultView = 'list') => {
-    await syncFromDisk($, { usage: true })
-    await actions($).go(view)
-    await $.ui.open({ id: PANE, title: '🔐 Vault' })
-  }
+  const openPane = (view?: VaultView) => openVaultPane($, view)
   if (sub !== '' && sub !== 'list' && !byPerson) return { text: '该子命令只能由用户本人在输入框执行。' }
   switch (sub) {
     case '': await openPane(); return {}
@@ -1203,6 +1205,20 @@ export const register: Register = on => {
   // `vault` is registered by this module; `vault:vault` is the shipped commands/vault.md
   on('command.run', { command: 'vault' }, ($, e) => vaultCommand($, e))
   on('command.run', { command: 'vault:vault' }, ($, e) => vaultCommand($, e))
+
+  // The desktop app queues a command typed during a turn until the turn ends, whatever the
+  // command declares; a button runs at once. The terminal runs /vault mid-turn already.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'desktop' || e.props.hasSurvey) return next(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const granted = Object.keys(await read($, grantsA)).length
+    return (
+      <Box>
+        <Button key="vault-open" label="🔐 Vault" onPress={() => openVaultPane($)} />
+        <Text dimColor>{granted ? ` 当前目录已授权 ${granted} 个凭证` : ' 当前目录未授权凭证'}</Text>
+      </Box>
+    )
+  })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     return renderPane($.ui.resolve(e), {

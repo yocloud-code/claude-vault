@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { TEMPLATES, exampleFor, namedVars, prefixOf, variantOf } from './templates'
-import { namedClash, selectProfiles } from './select'
+import { effectiveGrants, namedClash, selectProfiles } from './select'
 import type { VaultProfile } from '../types'
 
 const pg = (host: string): VaultProfile => ({ type: 'postgres', host, user: 'ro', secrets: ['password'], env: { ...variantOf('postgres').env } })
@@ -63,7 +63,6 @@ test('every template has a usable first variant', () => {
 })
 
 test('directory grants apply to the directory and everything under it, nearest wins', async () => {
-  const { effectiveGrants } = await import('./select')
   const all = {
     '/w': { a: { mode: 'read' as const, at: 1 }, b: { mode: 'read' as const, at: 1 } },
     '/w/proj': { b: { mode: 'write' as const, at: 2 } },
@@ -80,7 +79,6 @@ test('directory grants apply to the directory and everything under it, nearest w
 })
 
 test('only the first line can name profiles with #vault:', async () => {
-  const { selectProfiles } = await import('./select')
   const profiles = { 'prod-db': { type: 'postgres', secrets: ['password'], env: { PGPASSWORD: '{secret:password}' } } }
   const later = selectProfiles('git commit -m "note\n#vault: anything here"', profiles as any, new Set(['prod-db']))
   expect('deny' in later ? later.deny : [...later.picks.keys()]).toEqual([])
