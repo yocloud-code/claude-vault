@@ -124,3 +124,19 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
   }
 }
+
+test('clicking a profile name copies it', () => {
+  const calls: string[] = []
+  const spy = new Proxy({}, { get: (_, k) => (...args: unknown[]) => { calls.push(`${String(k)}:${args[0]}`) } }) as Actions
+  const find = (n: any, key: string): any => {
+    if (n == null || typeof n !== 'object') return undefined
+    if (Array.isArray(n)) { for (const c of n) { const f = find(c, key); if (f) return f } return undefined }
+    if (n.key === key || n.props?.key === key) return n
+    const kids = n.children ?? n.props?.children
+    return find(Array.isArray(kids) ? kids : [kids], key)
+  }
+  const name = find(renderPane(EL, base('list', 100), spy), 'sel-k8s-prod')
+  expect(name).toBeDefined()
+  ;(name.props?.onPress ?? name.onPress)()
+  expect(calls).toEqual(['select:k8s-prod', 'copy:k8s-prod'])
+})

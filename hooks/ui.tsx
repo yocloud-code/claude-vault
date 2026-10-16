@@ -452,7 +452,8 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
             <Box flexDirection="column" flexGrow={1}>
               <Box gap={1} alignItems="center">
                 <Text>{TYPE_ICON[p.type] ?? '🧩'}</Text>
-                <Button key={`sel-${n}`} plain label={n} onPress={() => a.select(n)} />
+                <Button key={`sel-${n}`} plain label={n} onPress={() => { a.select(n); a.copy(n, s.surface) }} />
+                <Text dimColor>⧉</Text>
                 <Text dimColor>{p.type}{p.type === 'ssh' ? ` · ${variantOf(p.type, p.variant).label}` : ''}</Text>
               </Box>
               <Text dimColor wrap="truncate-end">{target(p) || '—'}</Text>

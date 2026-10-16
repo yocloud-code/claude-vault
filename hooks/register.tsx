@@ -738,7 +738,8 @@ function actions($: EngineInterface): Actions {
   },
   copy: async (text, surface) => {
     const r = await $.ui.copy({ text, surface })
-    await notice($, r.isCopied ? '已复制到剪贴板' : '✖ 复制失败（当前界面不支持剪贴板）')
+    const what = text.length <= 40 && !text.includes('\n') ? `「${text}」` : ''
+    await notice($, r.isCopied ? `已复制${what}到剪贴板` : '✖ 复制失败（当前界面不支持剪贴板）')
   },
   go: async (view: VaultView) => {
     await update($, noticeA, () => '')

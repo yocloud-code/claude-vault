@@ -39,7 +39,7 @@ claude --plugin-dir /path/to/claude-vault
 4. **测试连接**：点卡片上的「测试连接」，确认能连上。
 5. **授权**：在卡片的「当前目录」一行点「只读」或「读写」。授权对当前目录及其子目录长期有效，点「不授权」撤销。
 
-之后在这个目录里直接跟 Claude 说"查一下 prod-db 的订单表"就行。
+之后在这个目录里直接跟 Claude 说"查一下 prod-db 的订单表"就行。点卡片上的名字会复制它，方便粘贴到对话里。
 
 ### Claude 怎么用凭证
 
@@ -136,7 +136,7 @@ To load it every time (desktop app included), add to `~/.claude/settings.json`:
 4. **Test it**: click "测试连接" (Test connection) on the card.
 5. **Grant it**: on the card's "当前目录" (current directory) row, click "只读" (read) or "读写" (write). The grant covers this directory and its subdirectories until you revoke it with "不授权" (none).
 
-From then on, just ask Claude, e.g. "check the orders table on prod-db".
+From then on, just ask Claude, e.g. "check the orders table on prod-db". Clicking a name on its card copies it, ready to paste into the chat.
 
 ### How Claude uses credentials
 
