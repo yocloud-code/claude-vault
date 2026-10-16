@@ -738,8 +738,9 @@ function actions($: EngineInterface): Actions {
   },
   copy: async (text, surface) => {
     const r = await $.ui.copy({ text, surface })
-    const what = text.length <= 40 && !text.includes('\n') ? `「${text}」` : ''
-    await notice($, r.isCopied ? `已复制${what}到剪贴板` : '✖ 复制失败（当前界面不支持剪贴板）')
+    // a passing toast, not a line in the pane: copying is not news worth keeping on screen
+    if (r.isCopied) $.ui.toast(text.length <= 40 && !text.includes('\n') ? `✓ 已复制 ${text}` : '✓ 已复制', { timeoutMs: 2000 })
+    else await notice($, '✖ 复制失败（当前界面不支持剪贴板）')
   },
   go: async (view: VaultView) => {
     await update($, noticeA, () => '')
