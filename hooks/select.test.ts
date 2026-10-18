@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { TEMPLATES, exampleFor, namedVars, prefixOf, variantOf } from './templates'
-import { effectiveGrants, namedClash, selectProfiles } from './select'
+import { effectiveGrants, grantsFor, namedClash, selectProfiles } from './select'
 import type { VaultProfile } from '../types'
 
 const pg = (host: string): VaultProfile => ({ type: 'postgres', host, user: 'ro', secrets: ['password'], env: { ...variantOf('postgres').env } })
@@ -84,4 +84,21 @@ test('only the first line can name profiles with #vault:', async () => {
   expect('deny' in later ? later.deny : [...later.picks.keys()]).toEqual([])
   const first = selectProfiles('#vault:prod-db\npsql', profiles as any, new Set(['prod-db']))
   expect('deny' in first ? first.deny : [...first.picks.keys()]).toEqual(['prod-db'])
+})
+
+test('a project grant reaches its subdirectories and worktrees, wherever they live', () => {
+  const at = 1
+  const all = {
+    '/w/shop': { db: { mode: 'read' as const, at } },
+    '/w/shop/.claude/worktrees/feat': { vps: { mode: 'write' as const, at } },
+    '/w/shop/api': { db: { mode: 'write' as const, at } },
+  }
+  // a worktree inside the repository, and one kept elsewhere, both see the project's grant
+  expect(Object.keys(grantsFor(all, '/w/shop/.claude/worktrees/other', '/w/shop'))).toEqual(['db'])
+  expect(grantsFor(all, '/tmp/wt/shop-feat', '/w/shop').db?.dir).toBe('/w/shop')
+  // a grant given to the directory itself still counts, and the nearer one wins
+  expect(Object.keys(grantsFor(all, '/w/shop/.claude/worktrees/feat', '/w/shop')).sort()).toEqual(['db', 'vps'])
+  expect(grantsFor(all, '/w/shop/api/src', '/w/shop').db?.mode).toBe('write')
+  // another repository gets nothing
+  expect(grantsFor(all, '/w/blog', '/w/blog')).toEqual({})
 })

@@ -122,7 +122,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         {narrow ? null : <Text dimColor wrap="truncate-start">{tilde(s.dir || s.cwd)}</Text>}
       </Box>
       <Box gap={2} flexWrap="wrap">
-        <Badge text={`当前目录已授权 ${granted.length}/${total}`} color={granted.length ? 'green' : 'gray'} />
+        <Badge text={`当前项目已授权 ${granted.length}/${total}`} color={granted.length ? 'green' : 'gray'} />
         <Text dimColor>{`授权对目录及子目录长期有效 · 共 ${dirCount} 个目录有授权`}</Text>
       </Box>
     </Box>
@@ -365,7 +365,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         {notice}
         {dirs.length === 0 ? (
           <Card k="g-empty" title="还没有任何授权">
-            <Text dimColor>在列表卡片上点「只读」或「读写」，就会授权给当前目录及其子目录。</Text>
+            <Text dimColor>在列表卡片上点「只读」或「读写」，就会授权给当前项目（包括它的子目录和 worktree）。</Text>
           </Card>
         ) : null}
         {dirs.map(d => {
@@ -373,7 +373,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
           const applies = here === d || here.startsWith(d.endsWith('/') ? d : `${d}/`)
           return (
             <Card key={`g-${d}`} k={`g-${d}`} title={tilde(d)} tone={applies ? 'green' : 'gray'}>
-              {applies ? <Text color="green">{here === d ? '● 当前目录' : '● 当前目录的上级，对当前目录生效'}</Text> : null}
+              {applies ? <Text color="green">{here === d ? '● 当前项目' : '● 当前项目的上级，对当前项目生效'}</Text> : null}
               {Object.entries(entries).sort().map(([n, g]) => (
                 <Box key={`g-${d}-${n}`} gap={1} alignItems="center">
                   <Box width={20} flexShrink={0}><Text bold>{n}</Text></Box>
@@ -431,7 +431,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
         <Card k="c-empty" title="还没有凭证">
           <Text><Text color="cyan" bold>1 </Text>点「新建」，选类型模板，填主机和用户</Text>
           <Text><Text color="cyan" bold>2 </Text>在编辑页点「设置」，用系统掩码框把密文写进钥匙串</Text>
-          <Text><Text color="cyan" bold>3 </Text>在卡片上点「只读」或「读写」授权给当前目录，Claude 就能通过 vault_exec 使用</Text>
+          <Text><Text color="cyan" bold>3 </Text>在卡片上点「只读」或「读写」授权给当前项目，Claude 就能通过 vault_exec 使用</Text>
           <Text dimColor>已有备份？点「导入」选择 .cvault 或模板 .json</Text>
         </Card>
       ) : (
@@ -486,7 +486,7 @@ export function renderPane(el: unknown, s: PaneState, a: Actions) {
           const current = g?.mode ?? 'off'
           const access = (
             <Box gap={1} alignItems="center" flexWrap="wrap" marginTop={1}>
-              <Box width={10} flexShrink={0}><Text dimColor>当前目录</Text></Box>
+              <Box width={10} flexShrink={0}><Text dimColor>当前项目</Text></Box>
               {missingSecret && !g ? (
                 <Text color="yellow">缺少密文，设置后才能授权</Text>
               ) : (

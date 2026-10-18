@@ -6,7 +6,7 @@ import { dumpReason, isAllowFile, isVaultPath, peekReason, writeReason } from '.
 import { HEADER, ITER, envelope, isSealed, parsePlain, sealedBody, unwrap } from './transfer'
 import type { Bundle } from './transfer'
 import { renderPane } from './ui'
-import { aliasKey, effectiveGrants, namedClash, selectProfiles, varsOf } from './select'
+import { aliasKey, grantsFor, namedClash, selectProfiles, varsOf } from './select'
 import { envProblem, envProblems, envToText, exampleFor, isDefaultMapping, missingFields, namedVars, parseEnv, secretProblem, templateOf, variantOf } from './templates'
 import type { Actions } from './ui'
 
@@ -178,13 +178,26 @@ const allowPath = (cwd: string) => `${cwd}/.claude/vault.json`
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,40}$/
 
+// A missing file reads as `fallback`. One that is there but cannot be parsed throws: read as
+// empty, a save on top of it would wipe every entry, and the pane would show nothing granted.
+async function readJson<T>($: EngineInterface, path: string, fallback: T): Promise<T> {
+  let raw: string
+  try {
+    raw = await $.fs.read(path)
+  } catch {
+    if (await $.fs.stat(path).catch(() => undefined)) throw new Error(`无法读取 ${path}`)
+    return fallback
+  }
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    throw new Error(`${path} 内容损坏，未做任何修改`)
+  }
+}
+
 async function loadProfiles($: EngineInterface): Promise<Record<string, VaultProfile>> {
   const { profiles } = await paths($)
-  try {
-    return JSON.parse(await $.fs.read(profiles)) as Record<string, VaultProfile>
-  } catch {
-    return {}
-  }
+  return readJson($, profiles, {} as Record<string, VaultProfile>)
 }
 
 async function saveProfiles($: EngineInterface, all: Record<string, VaultProfile>) {
@@ -209,12 +222,7 @@ async function loadAllow($: EngineInterface, cwd: string): Promise<{ allow: Allo
 
 async function loadGrantFile($: EngineInterface): Promise<VaultDirGrants> {
   const { grants } = await paths($)
-  try {
-    const parsed = JSON.parse(await $.fs.read(grants)) as { dirs?: VaultDirGrants }
-    return parsed.dirs ?? {}
-  } catch {
-    return {}
-  }
+  return (await readJson($, grants, {} as { dirs?: VaultDirGrants })).dirs ?? {}
 }
 
 async function saveGrantFile($: EngineInterface, dirs: VaultDirGrants) {
@@ -231,22 +239,42 @@ async function currentDir($: EngineInterface) {
   return real || raw
 }
 
+// The project a directory belongs to: the root of its main git repository, so a worktree (under
+// the repository or anywhere else) and every subdirectory meet the same grants. Outside git, the
+// directory itself.
+const rootCache = new Map<string, string>()
+
+async function projectRoot($: EngineInterface, dir: string) {
+  const hit = rootCache.get(dir)
+  if (hit) return hit
+  const r = await $.process.run(['/usr/bin/git', '-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { timeoutMs: 5_000 })
+    .catch(() => undefined)
+  const common = r?.exitCode === 0 ? r.stdout.trim() : ''
+  const top = common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : ''
+  const root = top ? ((await $.fs.stat(top, { resolve: true }).catch(() => undefined))?.realPath || top) : dir
+  rootCache.set(dir, root)
+  return root
+}
+
 let lastRawCwd = ''
 
 async function refreshGrants($: EngineInterface) {
   lastRawCwd = (await $.session.cwd().catch(() => '')) || cwd
   const dir = await currentDir($)
   cwd = dir
-  const all = await loadGrantFile($)
-  await update($, dirA, () => dir)
+  let all: VaultDirGrants
+  // a file that cannot be read keeps what this session last knew
+  try { all = await loadGrantFile($) } catch { return }
+  const root = await projectRoot($, dir)
+  await update($, dirA, () => root)
   await update($, allGrantsA, () => all)
-  await update($, grantsA, () => effectiveGrants(all, dir))
+  await update($, grantsA, () => grantsFor(all, dir, root))
   await syncStatus($)
 }
 
-// Grants or revokes `name` for `dir` (default: the session's directory); mode 'off' revokes.
+// Grants or revokes `name` for `dir` (default: the session's project); mode 'off' revokes.
 async function setGrant($: EngineInterface, name: string, mode: VaultMode | 'off', dir?: string) {
-  const where = dir ?? (await currentDir($))
+  const where = dir ?? (await projectRoot($, await currentDir($)))
   const all = await loadGrantFile($)
   const entries = { ...(all[where] ?? {}) }
   if (mode === 'off') delete entries[name]
@@ -293,7 +321,7 @@ async function sha256(text: string) {
 // Creates the file with mode 0600 (umask 077); the content travels on stdin.
 async function writePrivate($: EngineInterface, path: string, content: string) {
   const r = await $.process.run(
-    ['/bin/sh', '-c', 'umask 077; mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', path],
+    ['/bin/sh', '-c', 'umask 077; mkdir -p "$(dirname "$1")" && cat > "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1"', 'sh', path],
     { stdin: content },
   )
   if (r.exitCode !== 0) throw new Error(`write failed: ${path}`)
@@ -481,11 +509,12 @@ async function deleteProfile($: EngineInterface, n: string) {
 
 // What a full wipe would remove, for the confirmation.
 async function wipeSummary($: EngineInterface) {
-  const profiles = await loadProfiles($)
+  // a damaged file is wiped like a sound one
+  const profiles = await loadProfiles($).catch(() => ({} as Record<string, VaultProfile>))
   // the dump finds leftovers too; the profiles' own accounts are added in case it found nothing
   const own = Object.entries(profiles).flatMap(([n, p]) => (p.secrets ?? []).map(f => `${n}.${f}`)).filter(a => SAFE.test(a))
   const accounts = [...new Set([...(await vaultAccounts($)), ...own])]
-  const all = await loadGrantFile($)
+  const all = await loadGrantFile($).catch(() => ({} as VaultDirGrants))
   const grants = Object.values(all).reduce((n, e) => n + Object.keys(e).length, 0)
   const stray = await strayRunFiles($)
   return { profiles: Object.keys(profiles), accounts, dirs: Object.keys(all).length, grants, stray }
@@ -617,7 +646,9 @@ async function loadUsage($: EngineInterface) {
 }
 
 async function refreshProfiles($: EngineInterface) {
-  const profiles = await loadProfiles($)
+  let profiles: Record<string, VaultProfile>
+  // a file that cannot be read keeps what this session last knew
+  try { profiles = await loadProfiles($) } catch { return }
   const pairs = Object.entries(profiles).flatMap(([n, p]) => p.secrets.map(f => [n, f] as const))
   const found = await Promise.all(pairs.map(([n, f]) => hasSecret($, account(n, f))))
   const stored: Record<string, boolean> = Object.fromEntries(pairs.map(([n, f], i) => [`${n}.${f}`, found[i]]))
@@ -690,7 +721,7 @@ async function checkUse($: EngineInterface, name: string, command: string) {
   const p = profiles[name]
   if (!p) return { deny: `vault: 没有名为 ${name} 的 profile。` }
   const g = (await activeGrants($))[name]
-  if (!g) return { deny: `vault: profile ${name} 未授权给当前目录。请让用户在 /vault 面板里授权（授权对该目录及其子目录长期有效）。` }
+  if (!g) return { deny: `vault: profile ${name} 未授权给当前项目。请让用户在 /vault 面板里授权（授权对整个项目长期有效，包括子目录和 worktree）。` }
   const w = g.mode === 'read' ? writeReason(p, command) : undefined
   if (w) return { deny: w }
   return { p, g }
@@ -763,18 +794,18 @@ function actions($: EngineInterface): Actions {
     if (mode === 'off') {
       // an inherited grant lives on the directory above: revoke it where it was given
       const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[n]
-      const here = await currentDir($)
+      const here = await projectRoot($, await currentDir($))
       await setGrant($, n, 'off', g?.dir ?? here)
       return notice($, g && g.dir !== here
         ? `已撤销 ${n} 在 ${g.dir.replace(/^\/Users\/[^/]+/, '~')} 的授权（它的所有子目录同时失效）`
-        : `已撤销 ${n} 在当前目录的授权`)
+        : `已撤销 ${n} 在当前项目的授权`)
     }
     await setGrant($, n, mode)
     const p = ((await read($, profilesA)) as Record<string, VaultProfile>)[n]
     const stored = (await read($, storedA)) as Record<string, boolean>
     const unset = (p?.secrets ?? []).filter(x => !stored[`${n}.${x}`])
     const label = mode === 'write' ? '读写' : '只读'
-    await notice($, unset.length ? `⚠ 已授权 ${n}（${label}），但还缺少密文：${unset.join('、')}` : `已授权 ${n}（${label}）给当前目录及其子目录`)
+    await notice($, unset.length ? `⚠ 已授权 ${n}（${label}），但还缺少密文：${unset.join('、')}` : `已授权 ${n}（${label}）给当前项目（含它的子目录和 worktree）`)
   },
   revokeAt: async (dir, n) => {
     await setGrant($, n, 'off', dir)
@@ -1045,7 +1076,7 @@ async function vaultCommand($: EngineInterface, e: { args: string; origin: { kin
     case 'revoke': {
       if (!rest[0]) return { text: '用法: /vault revoke <profile>' }
       const g = ((await read($, grantsA)) as Record<string, VaultGrant>)[rest[0]]
-      if (!g) return { text: `${rest[0]} 在当前目录没有授权` }
+      if (!g) return { text: `${rest[0]} 在当前项目没有授权` }
       await setGrant($, rest[0], 'off', g.dir)
       return { text: `已撤销 ${rest[0]} 在 ${g.dir} 的授权` }
     }
@@ -1185,7 +1216,7 @@ export const register: Register = on => {
     const { dir } = await paths($)
     seenRevision = await $.fs.read(`${dir}/revision`).catch(() => '')
     await refreshProfiles($)
-    await migrateLegacyAllowlist($)
+    await migrateLegacyAllowlist($).catch(() => {})
     await refreshGrants($)
     await registerTools($)
     // grants survive a reload in $.state, the redaction table does not: reload it without holding
@@ -1217,7 +1248,7 @@ export const register: Register = on => {
     return (
       <Box>
         <Button key="vault-open" label="🔐 Vault" onPress={() => openVaultPane($)} />
-        <Text dimColor>{granted ? ` 当前目录已授权 ${granted} 个凭证` : ' 当前目录未授权凭证'}</Text>
+        <Text dimColor>{granted ? ` 当前项目已授权 ${granted} 个凭证` : ' 当前项目未授权凭证'}</Text>
       </Box>
     )
   })

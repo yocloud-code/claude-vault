@@ -35,6 +35,6 @@ const WRITES: Record<string, RegExp> = {
 export const writeReason = (profile: VaultProfile, command: string) => {
   const r = WRITES[profile.type]
   return r && r.test(command)
-    ? `vault: 该 profile 对当前目录只授权了只读，命令疑似写操作（匹配 ${profile.type} 写规则），已拒绝。需要写权限请让用户在 /vault 面板里把当前目录的授权改为「读写」。`
+    ? `vault: 该 profile 对当前项目只授权了只读，命令疑似写操作（匹配 ${profile.type} 写规则），已拒绝。需要写权限请让用户在 /vault 面板里把当前项目的授权改为「读写」。`
     : undefined
 }

@@ -15,7 +15,7 @@ Let Claude Code use your database, server and cluster credentials without ever s
 
 - 密码只存在 **macOS 钥匙串**里，Claude 只知道凭证的名字和用途；
 - 命令执行时由 Mod 把凭证注入成环境变量，输出里的密码会自动替换成 `«vault:名称.字段»`；
-- 你决定**哪个目录**可以用哪个凭证，只读还是读写。
+- 你决定**哪个项目**可以用哪个凭证，只读还是读写。
 
 ### 安装
 
@@ -37,7 +37,7 @@ claude --plugin-dir /path/to/claude-vault
 2. **新建凭证**：点「＋ 新建」，选类型（PostgreSQL、SSH、Kubernetes……），填主机、用户等信息，写一句描述（Claude 会据此选择凭证），点「创建」。
 3. **输入密码**：创建后会自动弹出系统的密码输入框（私钥、kubeconfig 会弹出文件选择），内容直接存进钥匙串，界面上永远不会显示。
 4. **测试连接**：点卡片上的「测试连接」，确认能连上。
-5. **授权**：在卡片的「当前目录」一行点「只读」或「读写」。授权对当前目录及其子目录长期有效，点「不授权」撤销。
+5. **授权**：在卡片的「当前项目」一行点「只读」或「读写」。授权给的是整个项目：在 git 仓库里就是仓库根目录，它的子目录和所有 worktree 都能用；不在 git 仓库里就是当前目录。授权长期有效，点「不授权」撤销。
 
 之后在这个目录里直接跟 Claude 说"查一下 prod-db 的订单表"就行。点卡片上的名字会复制它，方便粘贴到对话里。
 
@@ -51,7 +51,7 @@ claude --plugin-dir /path/to/claude-vault
 
 ### 授权
 
-- 授权给的是**目录**，不是会话；没有时长，撤销前一直有效。
+- 授权给的是**项目**（git 仓库根目录，不在仓库里时就是当前目录），不是会话；同一仓库的子目录和 worktree 共用授权，撤销前一直有效。
 - 子目录继承上级目录的授权，也可以单独设置，离得最近的那条生效。
 - 「授权管理」列出所有目录的授权，可以逐条撤销。
 - 授权记录保存在你的用户目录里，不在项目仓库中：别人的项目不能给自己授权，Claude 也改不了授权。
@@ -69,7 +69,7 @@ claude --plugin-dir /path/to/claude-vault
 | --- | --- |
 | `/vault` | 打开面板 |
 | `/vault list` | 列出凭证和授权状态 |
-| `/vault grant <名称> [read\|write]` | 授权给当前目录 |
+| `/vault grant <名称> [read\|write]` | 授权给当前项目 |
 | `/vault revoke <名称>` | 撤销授权 |
 | `/vault export`、`/vault import` | 导出、导入 |
 
@@ -112,7 +112,7 @@ Pasting passwords, keys or kubeconfigs into a chat leaves them in the transcript
 
 - secrets live only in the **macOS Keychain**; Claude only knows each credential's name and purpose;
 - the mod injects credentials into commands as environment variables, and any secret in the output is replaced with `«vault:name.field»`;
-- you decide **which directory** may use which credential, read-only or read-write.
+- you decide **which project** may use which credential, read-only or read-write.
 
 ### Install
 
@@ -134,7 +134,7 @@ To load it every time (desktop app included), add to `~/.claude/settings.json`:
 2. **Create a credential**: click "＋ 新建" (New), pick a type (PostgreSQL, SSH, Kubernetes, …), fill in host and user, add a short description (Claude uses it to pick the right credential), and click "创建" (Create).
 3. **Enter the secret**: a native password dialog opens right away (a file picker for keys and kubeconfigs). The value goes straight to the Keychain and is never shown.
 4. **Test it**: click "测试连接" (Test connection) on the card.
-5. **Grant it**: on the card's "当前目录" (current directory) row, click "只读" (read) or "读写" (write). The grant covers this directory and its subdirectories until you revoke it with "不授权" (none).
+5. **Grant it**: on the card's "当前项目" (current project) row, click "只读" (read) or "读写" (write). The grant goes to the whole project: in a git repository, its root, so every subdirectory and worktree can use it; elsewhere, the current directory. It lasts until you revoke it with "不授权" (none).
 
 From then on, just ask Claude, e.g. "check the orders table on prod-db". Clicking a name on its card copies it, ready to paste into the chat.
 
@@ -148,7 +148,7 @@ The edit page lists every variable a credential provides.
 
 ### Grants
 
-- Grants belong to **directories**, not sessions, and never expire until revoked.
+- Grants belong to **projects** (the git repository root, or the current directory outside git), not sessions. Subdirectories and worktrees of a repository share them, and they last until revoked.
 - Subdirectories inherit their parent's grants and can override them; the nearest one wins.
 - "授权管理" (Grants) lists every directory's grants and revokes them one by one.
 - Grants are stored in your home directory, outside any repository: a project cannot grant itself, and Claude cannot change grants.
@@ -166,7 +166,7 @@ The edit page lists every variable a credential provides.
 | --- | --- |
 | `/vault` | open the pane |
 | `/vault list` | list credentials and grants |
-| `/vault grant <name> [read\|write]` | grant to the current directory |
+| `/vault grant <name> [read\|write]` | grant to the current project |
 | `/vault revoke <name>` | revoke a grant |
 | `/vault export`, `/vault import` | export, import |
 

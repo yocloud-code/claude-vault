@@ -46,7 +46,7 @@ export function selectProfiles(command: string, profiles: Record<string, VaultPr
     const owners = new Map<string, string[]>()
     for (const n of names) {
       if (!profiles[n]) return { deny: `vault: 没有名为 ${n} 的 profile。` }
-      if (!granted.has(n)) return { deny: `vault: profile ${n} 未授权给当前目录。请让用户在 /vault 面板里授权。` }
+      if (!granted.has(n)) return { deny: `vault: profile ${n} 未授权给当前项目。请让用户在 /vault 面板里授权。` }
       const vars = varsOf(n, profiles[n])
       for (const k of Object.keys(vars)) owners.set(k, [...(owners.get(k) ?? []), n])
       picks.set(n, vars)
@@ -68,7 +68,7 @@ export function selectProfiles(command: string, profiles: Record<string, VaultPr
   for (const ref of refs) {
     const owner = Object.keys(profiles).find(n => ref in namedVars(n, profiles[n]))
     if (!owner) continue
-    if (!granted.has(owner)) return { deny: `vault: $${ref} 属于 profile ${owner}，它未授权给当前目录。请让用户在 /vault 面板里授权。` }
+    if (!granted.has(owner)) return { deny: `vault: $${ref} 属于 profile ${owner}，它未授权给当前项目。请让用户在 /vault 面板里授权。` }
     const named = namedVars(owner, profiles[owner])
     const sel = picks.get(owner) ?? Object.fromEntries(Object.entries(named).filter(([, t]) => !isSecretTpl(t)))
     sel[ref] = named[ref]
@@ -93,3 +93,10 @@ export const effectiveGrants = (all: VaultDirGrants, dir: string): Record<string
   }
   return out
 }
+
+/**
+ * The grants a session has: those of its project (the main repository's root, which a worktree
+ * kept elsewhere is not under) and those of its own directory, the nearer winning.
+ */
+export const grantsFor = (all: VaultDirGrants, dir: string, root: string): Record<string, VaultGrant> =>
+  ({ ...effectiveGrants(all, root), ...effectiveGrants(all, dir) })
